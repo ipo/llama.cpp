@@ -15,7 +15,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <clocale>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <signal.h>
@@ -27,17 +29,13 @@
 #endif
 
 static std::function<void(int)> shutdown_handler;
-static std::atomic_flag is_terminating = ATOMIC_FLAG_INIT;
+static std::atomic<int> termination_signal{0};
+static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal handler requires lock-free atomics");
 
 static inline void signal_handler(int signal) {
-    if (is_terminating.test_and_set()) {
-        // in case it hangs, we can force terminate the server by hitting Ctrl+C twice
-        // this is for better developer experience, we can remove when the server is stable enough
-        fprintf(stderr, "Received second interrupt, terminating immediately.\n");
-        exit(1);
+    if (termination_signal.exchange(signal) != 0) {
+        std::_Exit(1);
     }
-
-    shutdown_handler(signal);
 }
 
 // how the server is run; everything is on when it is the llama-server binary
@@ -347,6 +345,41 @@ static void server_install_signal_handlers() {
 #endif
 }
 
+struct server_signal_watcher {
+    std::atomic<bool> stopping{false};
+    std::thread thread;
+
+    void start(bool enabled) {
+        if (!enabled) {
+            return;
+        }
+        termination_signal.store(0);
+        server_install_signal_handlers();
+        thread = std::thread([this]() {
+            while (!stopping.load()) {
+                const int signal = termination_signal.load();
+                if (signal != 0) {
+                    SRV_INF("received signal %d, shutting down\n", signal);
+                    shutdown_handler(signal);
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+    }
+
+    void stop() {
+        stopping.store(true);
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    ~server_signal_watcher() {
+        stop();
+    }
+};
+
 // once the HTTP server listens: log the addresses and spawn llama-connect if asked, so the port is
 // bound and the child startup health check reaches us. the destructor of connect_proc stops it
 static bool server_on_listening(server_http_context & ctx_http, const common_params & params, server_connect & connect_proc) {
@@ -568,7 +601,9 @@ static int server_run_router(common_params & params, int argc, char ** argv, con
         return 1;
     }
 
-    auto clean_up = [&models_routes, &mcp_mgr]() {
+    server_signal_watcher signal_watcher;
+    auto clean_up = [&models_routes, &mcp_mgr, &signal_watcher]() {
+        signal_watcher.stop();
         SRV_INF("%s: cleaning up before exit...\n", __func__);
         // stop the session GC first, it finalizes live sessions and wakes pending readers
         server_stream_session_manager_stop();
@@ -606,9 +641,7 @@ static int server_run_router(common_params & params, int argc, char ** argv, con
         return 1;
     }
 
-    if (opts.install_signal_handlers) {
-        server_install_signal_handlers();
-    }
+    signal_watcher.start(opts.install_signal_handlers);
 
     server_connect connect_proc;
     if (!server_on_listening(ctx_http, params, connect_proc)) {
@@ -671,7 +704,9 @@ static int server_run_instance(common_params & params, server_role & role, commo
     }
 
     // setup clean up function, to be called before exit
-    auto clean_up = [&ctx_http, &ctx_server, &mcp_mgr]() {
+    server_signal_watcher signal_watcher;
+    auto clean_up = [&ctx_http, &ctx_server, &mcp_mgr, &signal_watcher]() {
+        signal_watcher.stop();
         SRV_INF("%s: cleaning up before exit...\n", __func__);
         // stop the session GC first, it finalizes live sessions and wakes pending readers
         server_stream_session_manager_stop();
@@ -713,9 +748,7 @@ static int server_run_instance(common_params & params, server_role & role, commo
         ctx_server.terminate();
     };
 
-    if (opts.install_signal_handlers) {
-        server_install_signal_handlers();
-    }
+    signal_watcher.start(opts.install_signal_handlers);
 
     server_connect connect_proc;
     if (!server_on_listening(ctx_http, params, connect_proc)) {
