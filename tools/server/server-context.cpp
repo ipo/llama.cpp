@@ -257,11 +257,14 @@ struct server_batch {
     }
 };
 
-static std::filesystem::file_time_type prompt_cache_time(int64_t t_used) {
-    // Use one clock snapshot so equal slot times stay equal in the cache.
-    static const auto t_file = std::filesystem::file_time_type::clock::now();
-    static const auto t_mono = ggml_time_us();
-    return t_file + std::chrono::duration_cast<std::filesystem::file_time_type::duration>(std::chrono::microseconds(t_used - t_mono));
+static std::filesystem::file_time_type prompt_cache_time(
+        int64_t t_used,
+        std::filesystem::file_time_type t_file = std::filesystem::file_time_type::clock::now(),
+        int64_t t_mono = ggml_time_us()) {
+    if (t_used < 0) {
+        return t_file;
+    }
+    return t_file - std::chrono::duration_cast<std::filesystem::file_time_type::duration>(std::chrono::microseconds(t_mono - t_used));
 }
 
 struct server_slot {
@@ -1154,9 +1157,11 @@ private:
 
         server_prompt_cache_disk::unbounded_queue_guard guard(*prompt_cache->disk);
 
+        const auto t_file = std::filesystem::file_time_type::clock::now();
+        const auto t_mono = ggml_time_us();
         for (auto & slot : slots) {
             if (!slot.is_processing()) {
-                slot.prompt_save(*prompt_cache, prompt_cache_time(slot.t_last_used));
+                slot.prompt_save(*prompt_cache, prompt_cache_time(slot.t_last_used, t_file, t_mono));
             }
         }
 
