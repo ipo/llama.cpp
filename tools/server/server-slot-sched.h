@@ -111,7 +111,7 @@ struct server_prompt_cache_disk {
 
     server_prompt_cache_disk_stats get_stats() const;
 
-    // removes the saved prompts that are a prefix of this one, then the oldest files if over the limit
+    // replaces saved prefixes and evicts older unprotected files only if the new prompt fits
     bool save(const server_prompt_cache_state & state);
 
     // writes newest first, keeping each state's recency time
