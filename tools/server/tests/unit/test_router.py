@@ -119,6 +119,51 @@ def test_router_unload_model():
     _wait_for_model_status(model_id, {"unloaded"})
 
 
+def test_router_sleep_waits_for_cache_save(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    log_path = tmp_path / "router.log"
+    preset_path = tmp_path / "sleep.ini"
+    model_id = "sleep-cache"
+    preset_path.write_text(
+        f"[{model_id}]\n"
+        "hf-repo = ggml-org-dev/test-model-stories260K\n"
+        "n-gpu-layers = 0\n"
+        "sleep-idle-seconds = 1\n"
+        f"cache-disk = {cache_dir}\n"
+    )
+    server.models_preset = str(preset_path)
+    server.log_path = str(log_path)
+    server.start()
+
+    res = server.make_request("POST", "/completion", data={
+        "model": model_id,
+        "prompt": [10 + i for i in range(200)],
+        "n_predict": 0,
+        "cache_prompt": True,
+    })
+    assert res.status_code == 200
+    assert server.process is not None
+    log_start = len(log_path.read_text())
+
+    with (cache_dir / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            deadline = time.monotonic() + 60
+            while "server is entering sleeping state" not in log_path.read_text()[log_start:]:
+                assert server.process.poll() is None
+                assert time.monotonic() < deadline, "child did not enter sleep"
+                time.sleep(0.01)
+            assert not list(cache_dir.glob("*.cache"))
+            assert _get_model_status(model_id) != "sleeping"
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+    _wait_for_model_status(model_id, {"sleeping"})
+    assert len(list(cache_dir.glob("*.cache"))) == 1
+
+
 def test_router_models_max_evicts_lru():
     global server
     server.models_max = 2

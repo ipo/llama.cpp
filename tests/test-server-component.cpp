@@ -2,7 +2,6 @@
 
 #include "../tools/server/server-chat.h"
 #include "../tools/server/server-common.h"
-#include "../tools/server/server-context.h"
 #include "../tools/server/server-decision.h"
 #include "../tools/server/server-schema.h"
 #include "../tools/server/server-slot-sched.h"
@@ -1095,47 +1094,6 @@ static void test_server_prompt_cache_disk(testing & t) {
         disk.flush({});
         t.assert_equal("queue not saved, no writes", (uint64_t) 0, disk.get_stats().n_saves);
     }
-
-    t.test("sleeping report follows context release", [&](testing & t) {
-        const char * model_path = std::getenv("LLAMA_ARG_MODEL");
-        if (!model_path) {
-            t.skip("set LLAMA_ARG_MODEL to a small GGUF to test sleeping context release");
-            return;
-        }
-
-        common_params params;
-        params.model.path = model_path;
-        params.n_ctx = 512;
-        params.n_parallel = 1;
-        params.n_gpu_layers = 0;
-        params.cpuparams.n_threads = 2;
-        params.cpuparams_batch.n_threads = 2;
-        params.sleep_idle_seconds = 0;
-        params.cache_disk_path = (dir / "sleep").string();
-
-        server_context ctx;
-        std::promise<bool> released;
-        auto result = released.get_future();
-        ctx.set_state_callback([&](server_state state, json) {
-            if (state == SERVER_STATE_SLEEPING) {
-                released.set_value(ctx.get_llama_context() == nullptr);
-            }
-        });
-        const bool loaded = ctx.load_model(params);
-        t.assert_true("model loaded", loaded);
-        if (!loaded) {
-            return;
-        }
-
-        std::thread loop([&] { ctx.start_loop(); });
-        const bool reported = result.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
-        ctx.terminate();
-        loop.join();
-        t.assert_true("sleeping reported", reported);
-        if (reported) {
-            t.assert_true("context freed before sleeping report", result.get());
-        }
-    });
 
     fs::remove_all(dir);
 }
