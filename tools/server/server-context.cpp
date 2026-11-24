@@ -257,6 +257,13 @@ struct server_batch {
     }
 };
 
+static std::filesystem::file_time_type prompt_cache_time(int64_t t_used) {
+    // Use one clock snapshot so equal slot times stay equal in the cache.
+    static const auto t_file = std::filesystem::file_time_type::clock::now();
+    static const auto t_mono = ggml_time_us();
+    return t_file + std::chrono::duration_cast<std::filesystem::file_time_type::duration>(std::chrono::microseconds(t_used - t_mono));
+}
+
 struct server_slot {
     int id;
 
@@ -341,7 +348,7 @@ struct server_slot {
 
     server_prompt prompt;
 
-    bool prompt_save(server_prompt_cache & prompt_cache, std::filesystem::file_time_type t_used = std::filesystem::file_time_type::clock::now()) const {
+    bool prompt_save(server_prompt_cache & prompt_cache, std::filesystem::file_time_type t_used) const {
         if (prompt.tokens.size() == 0) {
             return false;
         }
@@ -1147,13 +1154,9 @@ private:
 
         server_prompt_cache_disk::unbounded_queue_guard guard(*prompt_cache->disk);
 
-        // Convert the monotonic slot times to the file clock with one shared snapshot.
-        const auto t_now = std::filesystem::file_time_type::clock::now();
-        const auto t_now_us = ggml_time_us();
         for (auto & slot : slots) {
             if (!slot.is_processing()) {
-                const auto age = std::chrono::microseconds(t_now_us - slot.t_last_used);
-                slot.prompt_save(*prompt_cache, t_now - std::chrono::duration_cast<std::filesystem::file_time_type::duration>(age));
+                slot.prompt_save(*prompt_cache, prompt_cache_time(slot.t_last_used));
             }
         }
 
@@ -1857,7 +1860,7 @@ private:
 
         const int64_t t_start = ggml_time_us();
 
-        slot.prompt_save(*prompt_cache);
+        slot.prompt_save(*prompt_cache, prompt_cache_time(slot.t_last_used));
 
         if (!slot.prompt_load(*prompt_cache, task.tokens)) {
             slot.prompt_clear();
@@ -2649,7 +2652,7 @@ private:
         GGML_ASSERT(child_slots.size() == parent_task.child_tasks.size());
         for (auto * slot : child_slots) {
             // keep the state that the child task is about to overwrite
-            if (prompt_cache && slot->prompt_save(*prompt_cache)) {
+            if (prompt_cache && slot->prompt_save(*prompt_cache, prompt_cache_time(slot->t_last_used))) {
                 prompt_cache->update();
             }
 
@@ -3044,7 +3047,7 @@ private:
                             if (!slot.is_processing()) {
                                 SLT_TRC(slot, "%s", "saving idle slot to prompt cache\n");
 
-                                if (slot.prompt_save(*prompt_cache)) {
+                                if (slot.prompt_save(*prompt_cache, prompt_cache_time(slot.t_last_used))) {
                                     SLT_DBG(slot, "%s", "__TEST_TAG_CACHE_IDLE_SLOT__\n");
                                     prompt_cache->update();
                                 }

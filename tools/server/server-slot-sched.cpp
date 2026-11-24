@@ -423,8 +423,16 @@ server_prompt_cache_disk::entry_list::iterator server_prompt_cache_disk::remove(
 
 void server_prompt_cache_disk::touch(entry_list::iterator it, fs::file_time_type t_used) {
     std::error_code ec;
-    fs::last_write_time(dir / it->name, t_used, ec);
-    it->t_used = fs::last_write_time(dir / it->name, ec);
+    const auto t_current = fs::last_write_time(dir / it->name, ec);
+    if (!ec) {
+        it->t_used = t_current;
+        if (t_used > t_current) {
+            fs::last_write_time(dir / it->name, t_used, ec);
+            if (!ec) {
+                it->t_used = fs::last_write_time(dir / it->name, ec);
+            }
+        }
+    }
 
     const auto pos = std::find_if(entries.begin(), entries.end(), [&](const auto & entry) {
         return entry.t_used > it->t_used;
@@ -561,41 +569,35 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         return false;
     }
 
-    for (auto it = entries.begin(); it != entries.end();) {
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
         if (it->name == name) {
             SRV_TRC(" - prompt is already on disk, '%s'\n", name.c_str());
             touch(it, state.t_used);
             return true;
         }
+    }
 
+    std::vector<entry_list::iterator> obsolete;
+    std::vector<entry_list::iterator> evictions;
+    size_t size_remaining = size_impl();
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
         if (0 < it->n_tokens && it->n_tokens < tokens.size() && tokens.get_hash(it->n_tokens) == it->hash &&
                 std::find(keep.begin(), keep.end(), it->name) == keep.end()) {
-            SRV_TRC(" - removing obsolete prompt with length %zu from disk, '%s'\n", it->n_tokens, it->name.c_str());
-            it = remove(it);
-        } else {
-            ++it;
+            obsolete.push_back(it);
+            size_remaining -= it->size;
         }
     }
 
     if (has_limit) {
-        size_t size_keep = 0;
-        for (const auto & entry : entries) {
-            if (std::find(keep.begin(), keep.end(), entry.name) != keep.end()) {
-                size_keep += entry.size;
+        for (auto it = entries.begin(); it != entries.end() && size_remaining > limit_size - size_file; ++it) {
+            if (it->t_used < state.t_used && std::find(keep.begin(), keep.end(), it->name) == keep.end() &&
+                    std::find(obsolete.begin(), obsolete.end(), it) == obsolete.end()) {
+                evictions.push_back(it);
+                size_remaining -= it->size;
             }
         }
-        if (size_keep > limit_size - size_file) {
+        if (size_remaining > limit_size - size_file) {
             return false;
-        }
-
-        while (!entries.empty() && size_impl() + size_file > limit_size) {
-            auto it = std::find_if(entries.begin(), entries.end(), [&](const auto & entry) {
-                return std::find(keep.begin(), keep.end(), entry.name) == keep.end();
-            });
-            SRV_TRC(" - making room on disk, removing oldest file '%s' (size = %.3f MiB)\n",
-                    it->name.c_str(), it->size / (1024.0 * 1024.0));
-            remove(it);
-            stats.n_evictions++;
         }
     }
 
@@ -639,7 +641,14 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         }
     }
 
-    // a reader never sees a half written file
+    fs::last_write_time(path_tmp, state.t_used, ec);
+    if (ec) {
+        SRV_ERR("failed to stamp '%s': %s\n", path_tmp.string().c_str(), ec.message().c_str());
+        fs::remove(path_tmp, ec);
+        return false;
+    }
+
+    // a reader never sees a half written file or a temporary recency time
     fs::rename(path_tmp, path, ec);
     if (ec) {
         SRV_ERR("failed to rename '%s': %s\n", path_tmp.string().c_str(), ec.message().c_str());
@@ -647,9 +656,18 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         return false;
     }
 
-    fs::last_write_time(path, state.t_used, ec);
-
     guard.lock();
+    // Keep existing files until all checks and the new write succeed.
+    for (auto it : obsolete) {
+        SRV_TRC(" - removing obsolete prompt with length %zu from disk, '%s'\n", it->n_tokens, it->name.c_str());
+        remove(it);
+    }
+    for (auto it : evictions) {
+        SRV_TRC(" - making room on disk, removing oldest file '%s' (size = %.3f MiB)\n",
+                it->name.c_str(), it->size / (1024.0 * 1024.0));
+        remove(it);
+        stats.n_evictions++;
+    }
     server_prompt_cache_disk_entry entry;
     entry.name     = name;
     entry.size     = size_file;
