@@ -310,12 +310,20 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     server_cache_disk_lock guard(lock);
     refresh();
 
+    std::vector<const server_prompt_cache_state *> candidates;
+    for (auto it = states.rbegin(); it != states.rend(); ++it) {
+        candidates.push_back(&*it);
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto * a, const auto * b) {
+        return a->t_used > b->t_used;
+    });
+
     std::vector<std::string> keep;
     std::vector<const server_prompt_cache_state *> selected;
     size_t size_selected = 0;
-    for (auto it = states.rbegin(); it != states.rend(); ++it) {
-        const auto & tokens = it->prompt.tokens;
-        if (it->prompt.lora_changed || tokens.size() < server_tokens::hash_block_size || it->data.main.empty()) {
+    for (const auto * state : candidates) {
+        const auto & tokens = state->prompt.tokens;
+        if (state->prompt.lora_changed || tokens.size() < server_tokens::hash_block_size || state->data.main.empty()) {
             continue;
         }
 
@@ -326,7 +334,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
         if (limit_size > 0) {
             size_t size_file;
             try {
-                size_file = entry != entries.end() ? entry->size : make_header(*it, tokens.serialize().size()).size();
+                size_file = entry != entries.end() ? entry->size : make_header(*state, tokens.serialize().size()).size();
             } catch (const std::exception & e) {
                 SRV_WRN("failed to serialize the prompt: %s\n", e.what());
                 continue;
@@ -336,7 +344,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
             }
             size_selected += size_file;
         }
-        selected.push_back(&*it);
+        selected.push_back(state);
         if (entry != entries.end()) {
             keep.push_back(name);
         }
