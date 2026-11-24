@@ -1741,6 +1741,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_DISK_QUEUE").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--cache-disk-queue-drop"},
+        {"--no-cache-disk-queue-drop"},
+        "drop the oldest waiting prompts instead of waiting for room in the disk cache queue (default: disabled, requires cache-disk-queue)",
+        [](common_params & params, bool value) {
+            params.cache_disk_queue_drop = value;
+        }
+    ).set_env("LLAMA_ARG_CACHE_DISK_QUEUE_DROP").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
         "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",

@@ -1145,6 +1145,8 @@ private:
             return;
         }
 
+        server_prompt_cache_disk::unbounded_queue_guard guard(*prompt_cache->disk);
+
         // Convert the monotonic slot times to the file clock with one shared snapshot.
         const auto t_now = std::filesystem::file_time_type::clock::now();
         const auto t_now_us = ggml_time_us();
@@ -1640,7 +1642,7 @@ private:
                 SRV_WRN("%s", "--cache-disk is experimental, its behavior and file format can change in the future\n");
 
                 prompt_cache->disk = std::make_unique<server_prompt_cache_disk>(
-                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base, llama_n_ctx_seq(ctx_tgt), llama_n_seq_max(ctx_tgt), ctx_dft != nullptr), limit_size, mctx != nullptr, min_free_size, 1024ull * 1024ull * params_base.cache_disk_queue_mib);
+                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base, llama_n_ctx_seq(ctx_tgt), llama_n_seq_max(ctx_tgt), ctx_dft != nullptr), limit_size, mctx != nullptr, min_free_size, 1024ull * 1024ull * params_base.cache_disk_queue_mib, params_base.cache_disk_queue_drop);
             }
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");

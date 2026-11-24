@@ -667,6 +667,7 @@ struct common_params {
     int32_t cache_disk_max_size_mib = -1;       // -1 = no limit
     int32_t cache_disk_min_free_mib = 0;        // minimum free space to keep on the cache filesystem
     int32_t cache_disk_queue_mib = 0;           // 0 = synchronous writes
+    bool cache_disk_queue_drop = false;
 
     // llama-connect params
     bool        server_connect      = false;

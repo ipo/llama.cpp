@@ -1647,6 +1647,10 @@ std::string server_task_result_metrics::to_metrics() {
             "prompt_cache_disk_evictions_total",
             "Disk prompt cache: Number of files removed to stay under the size limit",
             (double) cache_disk.n_evictions
+        }, {
+            "prompt_cache_disk_drops_total",
+            "Disk prompt cache: Number of states dropped from the write queue",
+            (double) cache_disk.n_drops
         },
     };
 
