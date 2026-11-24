@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <regex>
 #include <string>
@@ -346,6 +347,47 @@ static void test_server_prompt_cache_disk(testing & t) {
     }
 
     {
+        const fs::path reserve_dir = dir / "reserve";
+        fs::create_directories(reserve_dir);
+        server_prompt_cache_disk disk(reserve_dir.string(), compat, 0, false, std::numeric_limits<size_t>::max());
+        t.assert_true("save with impossible free space reserve", !disk.save(state));
+        t.assert_equal("no file with impossible free space reserve", (size_t) 0, disk.get_entries().size());
+    }
+
+    {
+        const fs::path deficit_dir = dir / "deficit";
+        fs::create_directories(deficit_dir);
+        server_prompt_cache_disk disk(deficit_dir.string(), compat, 0, false);
+        t.assert_true("save before free space deficit", disk.save(make_cache_state(n_tok, 10, 1000)));
+        t.assert_true("save second before free space deficit", disk.save(make_cache_state(n_tok, 11, 1000)));
+        t.assert_true("save third before free space deficit", disk.save(make_cache_state(n_tok, 12, 1000)));
+
+        const size_t size_current = disk.size();
+        const size_t deficit = size_current / 6;
+        const std::string oldest = disk.get_entries().front().name;
+        const auto new_state = make_cache_state(n_tok, 13, 1000);
+        server_prompt_cache_disk disk_with_reserve(deficit_dir.string(), compat, 0, false, deficit, 0);
+        const bool saved = disk_with_reserve.save(new_state);
+        const size_t limit = size_current - deficit;
+        t.assert_true("save under free space deficit reserve", saved);
+        t.assert_true("evict to free space deficit limit", disk_with_reserve.size() <= limit);
+        t.assert_equal("one old file remains after deficit eviction", (size_t) 2, disk_with_reserve.get_entries().size());
+        t.assert_true("oldest file evicted for deficit", !fs::exists(deficit_dir / oldest));
+        t.assert_true("new file saved under deficit", disk_with_reserve.get_entries().back().hash == new_state.prompt.tokens.get_hash(n_tok));
+    }
+
+    {
+        const fs::path deficit_dir = dir / "deficit-too-large";
+        fs::create_directories(deficit_dir);
+        server_prompt_cache_disk disk(deficit_dir.string(), compat, 0, false);
+        t.assert_true("save before oversized free space deficit", disk.save(make_cache_state(n_tok, 13, 1000)));
+        const size_t size_current = disk.size();
+        server_prompt_cache_disk disk_with_reserve(deficit_dir.string(), compat, 0, false, size_current + 1, 0);
+        t.assert_true("skip save when free space deficit exceeds cache", !disk_with_reserve.save(make_cache_state(n_tok, 14, 1000)));
+        t.assert_equal("keep cache when deficit exceeds cache", size_current, disk_with_reserve.size());
+    }
+
+    {
         server_prompt_cache_disk disk(dir.string(), compat, 0, false);
         t.assert_equal("empty dir", (size_t) 0, disk.get_entries().size());
         t.assert_true("save", disk.save(state));
@@ -497,7 +539,7 @@ static void test_server_prompt_cache_disk(testing & t) {
     }
 
     for (bool size_limit : { false, true }) {
-        for (bool reserve : { false }) {
+        for (bool reserve : { false, true }) {
             for (const std::string mode : { "save", "flush" }) {
                 const auto case_dir = dir / ("recency-" + std::to_string(size_limit) + std::to_string(reserve) + mode);
                 fs::create_directories(case_dir);
@@ -517,7 +559,7 @@ static void test_server_prompt_cache_disk(testing & t) {
                     auto candidate = make_cache_state(n_tok, 3 + age, age == 3 ? 2500 : 1000);
                     candidate.t_used = fs::file_time_type{} + std::chrono::seconds(age);
                     {
-                        server_prompt_cache_disk disk(case_dir.string(), compat, size_limit ? limit : 0, false);
+                        server_prompt_cache_disk disk(case_dir.string(), compat, size_limit ? limit : 0, false, reserve ? 1 : 0, 1);
                         if (mode == "save") {
                             t.assert_true("recency, direct result", disk.save(candidate) == (!bounded || age == 5));
                         } else {
@@ -545,7 +587,7 @@ static void test_server_prompt_cache_disk(testing & t) {
         }
     }
 
-    for (bool reserve : { false }) {
+    for (bool reserve : { false, true }) {
         const auto case_dir = dir / ("refused-prefix-" + std::to_string(reserve));
         fs::create_directories(case_dir);
         auto shorter = make_cache_state(n_tok, 1, 1000);
@@ -559,7 +601,7 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_true("refused prefix, seed shorter", seed.save(shorter));
         t.assert_true("refused prefix, seed kept", seed.save(kept));
         const auto before = seed.get_entries();
-        server_prompt_cache_disk disk(case_dir.string(), compat, reserve ? seed.size() + 1000 : seed.size(), false);
+        server_prompt_cache_disk disk(case_dir.string(), compat, reserve ? seed.size() + 1000 : seed.size(), false, reserve ? 1 : 0, 1);
         if (reserve) {
             std::list<server_prompt_cache_state> states;
             states.push_back(std::move(longer));
