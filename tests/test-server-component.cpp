@@ -442,6 +442,54 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_true("shared, tmp file removed", !fs::exists(path_tmp));
     }
 
+    for (size_t n_files = 1; n_files <= 3; ++n_files) {
+        const auto stamp_dir = dir / ("stamp-" + std::to_string(n_files));
+        fs::create_directories(stamp_dir);
+        server_prompt_cache cache(0, 0);
+        size_t size_file;
+        {
+            server_prompt_cache_disk probe(stamp_dir.string(), compat, 0, false);
+            t.assert_true("stamp, probe save", probe.save(state));
+            size_file = probe.size();
+        }
+        fs::remove_all(stamp_dir);
+        fs::create_directories(stamp_dir);
+        cache.disk = std::make_unique<server_prompt_cache_disk>(stamp_dir.string(), compat, n_files == 3 ? 0 : n_files * size_file, false);
+        for (llama_token last : { 1, 2, 3 }) {
+            auto cur = make_cache_state(n_tok, last, 1000);
+            cur.t_used = fs::file_time_type{} + std::chrono::seconds(last);
+            cache.states.push_back(std::move(cur));
+        }
+        cache.flush_to_disk();
+        server_prompt_cache_disk scanned(stamp_dir.string(), compat, 0, false);
+        t.assert_equal("stamp, file count", n_files, scanned.get_entries().size());
+        auto cur = cache.states.begin();
+        std::advance(cur, 3 - n_files);
+        for (const auto & entry : scanned.get_entries()) {
+            t.assert_true("stamp, state order", entry.hash == cur->prompt.tokens.get_hash(n_tok));
+            t.assert_true("stamp, final time at save", entry.t_used == cur->t_used);
+            ++cur;
+        }
+    }
+
+    {
+        const auto stamp_dir = dir / "stamp-save";
+        fs::create_directories(stamp_dir);
+        server_prompt_cache_disk disk(stamp_dir.string(), compat, 0, false);
+        auto older = make_cache_state(n_tok, 1, 1000);
+        auto newer = make_cache_state(n_tok, 2, 1000);
+        older.t_used = fs::file_time_type{} + std::chrono::seconds(1);
+        newer.t_used = fs::file_time_type{} + std::chrono::seconds(2);
+        t.assert_true("stamp, save newer", disk.save(newer));
+        t.assert_true("stamp, save older", disk.save(older));
+        t.assert_true("stamp, older inserted first", disk.get_entries().front().hash == older.prompt.tokens.get_hash(n_tok));
+        t.assert_true("stamp, touch older", disk.save(older));
+        t.assert_true("stamp, older touched first", disk.get_entries().front().hash == older.prompt.tokens.get_hash(n_tok));
+        server_prompt_cache_disk scanned(stamp_dir.string(), compat, 0, false);
+        t.assert_true("stamp, older scanned first", scanned.get_entries().front().hash == older.prompt.tokens.get_hash(n_tok));
+        t.assert_equal("stamp, no rewrite", (uint64_t) 2, disk.get_stats().n_saves);
+    }
+
     for (size_t limit : { (size_t) 0, (size_t) 4000 }) {
         for (bool existing : { false, true }) {
             fs::remove_all(dir);
