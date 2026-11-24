@@ -532,8 +532,14 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         } else {
             const size_t size_current = size_impl();
             const size_t size_available = space.available > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : (size_t) space.available;
-            const size_t size_room = size_available > min_free_size ? size_available - min_free_size : 0;
-            const size_t limit_free = size_current > std::numeric_limits<size_t>::max() - size_room ? std::numeric_limits<size_t>::max() : size_current + size_room;
+            size_t limit_free;
+            if (size_available >= min_free_size) {
+                const size_t size_room = size_available - min_free_size;
+                limit_free = size_current > std::numeric_limits<size_t>::max() - size_room ? std::numeric_limits<size_t>::max() : size_current + size_room;
+            } else {
+                const size_t size_deficit = min_free_size - size_available;
+                limit_free = size_current > size_deficit ? size_current - size_deficit : 0;
+            }
             limit_size = limit_size > 0 ? std::min(limit_size, limit_free) : limit_free;
             has_limit = true;
         }

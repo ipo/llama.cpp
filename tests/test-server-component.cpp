@@ -297,6 +297,23 @@ static void test_server_prompt_cache_disk(testing & t) {
     }
 
     {
+        const fs::path deficit_dir = dir / "deficit";
+        fs::create_directories(deficit_dir);
+        server_prompt_cache_disk disk(deficit_dir.string(), compat, 0, false);
+        t.assert_true("save before free space deficit", disk.save(make_cache_state(n_tok, 10, 1000)));
+        t.assert_true("save second before free space deficit", disk.save(make_cache_state(n_tok, 11, 1000)));
+
+        const size_t size_current = disk.size();
+        const auto space = fs::space(deficit_dir);
+        const size_t deficit = size_current / 2;
+        const size_t reserve = (size_t) space.available + deficit;
+        server_prompt_cache_disk disk_with_reserve(deficit_dir.string(), compat, 0, false, reserve);
+        const bool saved = disk_with_reserve.save(make_cache_state(n_tok, 12, 1000));
+        const size_t limit = size_current - deficit;
+        t.assert_true("save under free space deficit reserve", !saved || disk_with_reserve.size() <= limit);
+    }
+
+    {
         server_prompt_cache_disk disk(dir.string(), compat, 0, false);
         t.assert_equal("empty dir", (size_t) 0, disk.get_entries().size());
         t.assert_true("save", disk.save(state));
