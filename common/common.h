@@ -665,6 +665,7 @@ struct common_params {
     bool    cache_ram_explicit  = false; // set by --cache-ram, decision models disable the cache otherwise
     std::string cache_disk_path;             // directory of the disk prompt cache, empty = disabled
     int32_t cache_disk_max_size_mib = -1;       // -1 = no limit
+    int32_t cache_disk_min_free_mib = 0;        // minimum free space to keep on the cache filesystem
 
     // llama-connect params
     bool        server_connect      = false;
