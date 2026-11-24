@@ -984,15 +984,18 @@ static void test_server_prompt_cache_disk(testing & t) {
         server_prompt_cache_disk disk(queue_dir.string(), compat, 0, false, 0, 4096);
         common_file_lock held((queue_dir / ".lock").string());
         t.assert_true("queue locked save, lock", held.acquire());
-        for (llama_token last : { 1, 2 }) {
-            disk.enqueue(make_cache_state(2 * n_blk, last, 1000));
-        }
+        auto pending = make_cache_state(2 * n_blk, 1, 1000);
+        const size_t pending_size = pending.size();
+        disk.enqueue(std::move(pending));
+        t.assert_equal("queue locked save, pending bytes", pending_size, disk.get_stats().pending_bytes);
+        disk.enqueue(make_cache_state(2 * n_blk, 2, 1000));
         t.assert_equal("queue locked save, no file", (uint64_t) 0, disk.get_stats().n_files);
         for (const auto & file : fs::directory_iterator(queue_dir)) {
             t.assert_true("queue locked save, no cache file", file.path().extension() != ".cache");
         }
         held.close();
         disk.flush({});
+        t.assert_equal("queue locked save, pending bytes flushed", (uint64_t) 0, disk.get_stats().pending_bytes);
         t.assert_equal("queue locked save, both saved", (uint64_t) 2, disk.get_stats().n_saves);
         t.assert_equal("queue locked save, both files", (size_t) 2, disk.get_entries().size());
         for (const auto & entry : disk.get_entries()) {
