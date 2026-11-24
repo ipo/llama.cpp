@@ -195,8 +195,8 @@ static server_cache_disk_header read_header(std::ifstream & in, const std::strin
     return header;
 }
 
-server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size)
-        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()) {
+server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size, size_t queue_limit)
+        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()), queue_limit(queue_limit) {
     server_cache_disk_lock guard(lock);
     refresh();
 
@@ -206,9 +206,84 @@ server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, cons
 
     SRV_INF("disk prompt cache '%s': %zu prompts, %zu files of other models, %.3f MiB (limit: %.3f MiB)\n",
             this->dir.string().c_str(), n_usable, entries.size() - n_usable, size_impl() / (1024.0 * 1024.0), limit_size / (1024.0 * 1024.0));
+
+    if (queue_limit > 0) {
+        writer = std::thread(&server_prompt_cache_disk::writer_loop, this);
+    }
+}
+
+server_prompt_cache_disk::~server_prompt_cache_disk() {
+    if (writer.joinable()) {
+        {
+            std::lock_guard<std::mutex> guard(mutex_queue);
+            stopping = true;
+        }
+        condition.notify_all();
+        writer.join();
+    }
+}
+
+void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
+    if (state.prompt.lora_changed || state.prompt.tokens.size() < server_tokens::hash_block_size || state.data.main.empty()) {
+        return;
+    }
+    if (queue_limit == 0) {
+        save(state);
+        return;
+    }
+
+    const size_t size = state.size();
+    std::unique_lock<std::mutex> guard(mutex_queue);
+    condition.wait(guard, [&] {
+        return queue_size == 0 || (size <= queue_limit && queue_size <= queue_limit - size);
+    });
+    queue.push_back(std::move(state));
+    queue_size += size;
+    condition.notify_all();
+}
+
+void server_prompt_cache_disk::writer_loop() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> guard(mutex_queue);
+            condition.wait(guard, [&] { return stopping || !queue.empty(); });
+            if (queue.empty()) {
+                return;
+            }
+        }
+
+        std::lock_guard<std::mutex> guard_mutex(mutex);
+        server_cache_disk_lock guard(lock);
+        {
+            std::lock_guard<std::mutex> guard_queue(mutex_queue);
+            if (queue.empty()) {
+                continue;
+            }
+            writing = &queue.front();
+            writing_taken = false;
+        }
+
+        try {
+            refresh();
+            save_impl(*writing, {});
+        } catch (const std::exception & e) {
+            SRV_ERR("disk prompt cache writer failed: %s\n", e.what());
+        }
+
+        {
+            std::lock_guard<std::mutex> guard_queue(mutex_queue);
+            queue_size -= writing->size();
+            if (!writing_taken) {
+                queue.pop_front();
+            }
+            writing = nullptr;
+        }
+        condition.notify_all();
+    }
 }
 
 void server_prompt_cache_disk::refresh() {
+    std::lock_guard<std::mutex> guard(mutex_queue);
     entry_list known = std::move(entries);
     entries.clear();
 
@@ -267,12 +342,12 @@ void server_prompt_cache_disk::refresh() {
 }
 
 size_t server_prompt_cache_disk::size() const {
-    std::lock_guard<std::mutex> guard(mutex);
+    std::lock_guard<std::mutex> guard(mutex_queue);
     return size_impl();
 }
 
 std::list<server_prompt_cache_disk_entry> server_prompt_cache_disk::get_entries() const {
-    std::lock_guard<std::mutex> guard(mutex);
+    std::lock_guard<std::mutex> guard(mutex_queue);
     return entries;
 }
 
@@ -287,7 +362,7 @@ size_t server_prompt_cache_disk::size_impl() const {
 }
 
 server_prompt_cache_disk_stats server_prompt_cache_disk::get_stats() const {
-    std::lock_guard<std::mutex> guard(mutex);
+    std::lock_guard<std::mutex> guard(mutex_queue);
     server_prompt_cache_disk_stats res = stats;
     res.n_files = entries.size();
     res.size    = size_impl();
@@ -321,12 +396,27 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     server_cache_disk_lock guard(lock);
     refresh();
 
+    std::list<server_prompt_cache_state> queued;
+    size_t size_queued = 0;
+    {
+        std::lock_guard<std::mutex> guard_queue(mutex_queue);
+        queued.splice(queued.end(), queue);
+        size_queued = queue_size;
+    }
+    std::vector<const server_prompt_cache_state *> candidates;
+    for (auto it = states.rbegin(); it != states.rend(); ++it) {
+        candidates.push_back(&*it);
+    }
+    for (auto it = queued.rbegin(); it != queued.rend(); ++it) {
+        candidates.push_back(&*it);
+    }
+
     std::vector<std::string> keep;
     std::vector<const server_prompt_cache_state *> selected;
     size_t size_selected = 0;
-    for (auto it = states.rbegin(); it != states.rend(); ++it) {
-        const auto & tokens = it->prompt.tokens;
-        if (it->prompt.lora_changed || tokens.size() < server_tokens::hash_block_size || it->data.main.empty()) {
+    for (const auto * state : candidates) {
+        const auto & tokens = state->prompt.tokens;
+        if (state->prompt.lora_changed || tokens.size() < server_tokens::hash_block_size || state->data.main.empty()) {
             continue;
         }
 
@@ -337,7 +427,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
         if (limit_size > 0) {
             size_t size_file;
             try {
-                size_file = entry != entries.end() ? entry->size : make_header(*it, tokens.serialize().size()).size();
+                size_file = entry != entries.end() ? entry->size : make_header(*state, tokens.serialize().size()).size();
             } catch (const std::exception & e) {
                 SRV_WRN("failed to serialize the prompt: %s\n", e.what());
                 continue;
@@ -347,7 +437,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
             }
             size_selected += size_file;
         }
-        selected.push_back(&*it);
+        selected.push_back(state);
         if (entry != entries.end()) {
             keep.push_back(name);
         }
@@ -368,15 +458,19 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     }
 
     // restore oldest first with metadata updates only
+    std::lock_guard<std::mutex> guard_queue(mutex_queue);
     for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
         auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
             return cur.name == *it;
         });
         touch(entry);
     }
+    queue_size -= size_queued;
+    condition.notify_all();
 }
 
 bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep) {
+    std::unique_lock<std::mutex> guard(mutex_queue);
     const auto & tokens = state.prompt.tokens;
 
     // a prompt without a full hash block can never be found
@@ -459,6 +553,7 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         }
     }
 
+    guard.unlock();
     const int64_t t_start = ggml_time_us();
 
     const fs::path path     = dir / name;
@@ -506,6 +601,7 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         return false;
     }
 
+    guard.lock();
     server_prompt_cache_disk_entry entry;
     entry.name     = name;
     entry.size     = size_file;
@@ -551,15 +647,50 @@ server_prompt_cache_disk::entry_list::iterator server_prompt_cache_disk::find(co
 }
 
 bool server_prompt_cache_disk::load(const server_tokens & tokens, size_t n_prefix_min, size_t n_tokens_max, server_prompt_cache_state & state) {
-    std::lock_guard<std::mutex> guard_mutex(mutex);
-    // the lock is taken only if the files that are known so far have a match
-    if (find(tokens, n_prefix_min, n_tokens_max) == entries.end()) {
-        return false;
+    {
+        std::unique_lock<std::mutex> guard_queue(mutex_queue);
+        auto best = queue.end();
+        size_t n_prefix_best = n_prefix_min;
+        for (auto it = queue.begin(); it != queue.end(); ++it) {
+            const auto & cur = it->prompt.tokens;
+            if (cur.size() > n_tokens_max) {
+                continue;
+            }
+            const size_t n_prefix = tokens.get_common_prefix_lower(cur.get_prefix_hashes());
+            if (n_prefix > n_prefix_best && n_prefix >= 0.25f * cur.size()) {
+                best = it;
+                n_prefix_best = n_prefix;
+            }
+        }
+
+        if (best != queue.end() && find(tokens, n_prefix_best, n_tokens_max) == entries.end()) {
+            if (&*best == writing) {
+                // Keep the node alive until the writer no longer reads its state.
+                std::list<server_prompt_cache_state> pending;
+                pending.splice(pending.end(), queue, best);
+                writing_taken = true;
+                condition.wait(guard_queue, [&] { return writing != &pending.front(); });
+                state = std::move(pending.front());
+            } else {
+                queue_size -= best->size();
+                state = std::move(*best);
+                queue.erase(best);
+                condition.notify_all();
+            }
+            return true;
+        }
+
+        // The directory lock is needed only if a known file can improve the match.
+        if (find(tokens, n_prefix_min, n_tokens_max) == entries.end()) {
+            return false;
+        }
     }
 
+    std::lock_guard<std::mutex> guard_mutex(mutex);
     server_cache_disk_lock guard(lock);
     refresh();
 
+    std::lock_guard<std::mutex> guard_queue(mutex_queue);
     const auto it = find(tokens, n_prefix_min, n_tokens_max);
     if (it == entries.end()) {
         return false;
@@ -806,12 +937,12 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     return &states.back();
 }
 
-void server_prompt_cache::save_to_disk(const server_prompt_cache_state & state) {
+void server_prompt_cache::save_to_disk(server_prompt_cache_state && state) {
     if (!disk || state.prompt.lora_changed) {
         return;
     }
 
-    disk->save(state);
+    disk->enqueue(std::move(state));
 }
 
 void server_prompt_cache::flush_to_disk() {
@@ -821,7 +952,7 @@ void server_prompt_cache::flush_to_disk() {
 }
 
 void server_prompt_cache::pop_oldest() {
-    save_to_disk(states.front());
+    save_to_disk(std::move(states.front()));
     states.pop_front();
 }
 
