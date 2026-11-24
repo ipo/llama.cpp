@@ -108,7 +108,7 @@ struct server_prompt_cache_disk {
     // compat: 16 hex chars, changes when the saved states can no longer be used (other model, mmproj, etc.)
     // limit_size: in bytes, 0 = no limit
     // queue_limit: in bytes, 0 = synchronous writes
-    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, std::optional<std::uintmax_t> space_available_override = std::nullopt);
+    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, bool queue_drop = false, std::optional<std::uintmax_t> space_available_override = std::nullopt);
     ~server_prompt_cache_disk();
 
     // the files as of the last operation, another server can change them at any time
@@ -123,6 +123,18 @@ struct server_prompt_cache_disk {
 
     // moves an evicted state to the writer, or saves it synchronously when the queue is disabled
     void enqueue(server_prompt_cache_state && state);
+
+    // keeps shutdown and sleep saves from waiting for room or dropping queued states
+    struct unbounded_queue_guard {
+        explicit unbounded_queue_guard(server_prompt_cache_disk & disk);
+        ~unbounded_queue_guard();
+        unbounded_queue_guard(const unbounded_queue_guard &) = delete;
+        unbounded_queue_guard & operator=(const unbounded_queue_guard &) = delete;
+
+    private:
+        server_prompt_cache_disk & disk;
+        bool was_unbounded;
+    };
 
     // writes newest first, keeping each state's recency time
     void flush(const std::list<server_prompt_cache_state> & states);
@@ -175,6 +187,8 @@ private:
     std::condition_variable condition;
     std::list<server_prompt_cache_state> queue;
     size_t queue_limit;
+    bool queue_drop;
+    bool queue_unbounded = false;
     size_t queue_size = 0;
     server_prompt_cache_state * writing = nullptr;
     bool writing_taken = false;

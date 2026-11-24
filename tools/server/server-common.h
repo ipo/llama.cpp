@@ -534,6 +534,7 @@ struct server_prompt_cache_disk_stats {
     uint64_t n_saves      = 0; // files written
     uint64_t n_loads      = 0; // files read
     uint64_t n_evictions  = 0; // files removed to stay under the size limit
+    uint64_t n_drops      = 0; // states dropped from the write queue
     uint64_t size_saved   = 0; // in bytes
     uint64_t size_loaded  = 0; // in bytes
     uint64_t t_save       = 0; // in microseconds
