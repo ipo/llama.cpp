@@ -1145,6 +1145,8 @@ private:
             return;
         }
 
+        server_prompt_cache_disk::unbounded_queue_guard guard(*prompt_cache->disk);
+
         // Convert the monotonic slot times to the file clock with one shared snapshot.
         const auto t_now = std::filesystem::file_time_type::clock::now();
         const auto t_now_us = ggml_time_us();
