@@ -101,7 +101,7 @@ struct server_prompt_cache_disk_entry {
 struct server_prompt_cache_disk {
     // compat: 16 hex chars, changes when the saved states can no longer be used (other model, mmproj, etc.)
     // limit_size: in bytes, 0 = no limit
-    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd);
+    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0);
 
     // the files as of the last operation, another server can change them at any time
     const std::list<server_prompt_cache_disk_entry> & get_entries() const { return entries; }
@@ -144,6 +144,7 @@ private:
     std::filesystem::path dir;
     std::string compat;
     size_t limit_size;
+    size_t min_free_size;
     bool has_mtmd;
 
     // oldest first
