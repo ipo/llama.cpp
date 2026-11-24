@@ -518,6 +518,159 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_true("shared, tmp file removed", !fs::exists(path_tmp));
     }
 
+    {
+        const auto case_dir = dir / "refused-write";
+        const auto probe_dir = dir / "refused-write-probe";
+        fs::create_directories(case_dir);
+        fs::create_directories(probe_dir);
+        auto older = make_cache_state(n_tok, 1, 1000);
+        auto newer = make_cache_state(n_tok, 2, 1000);
+        older.t_used = fs::file_time_type{} + std::chrono::seconds(1);
+        newer.t_used = fs::file_time_type{} + std::chrono::seconds(2);
+        server_prompt_cache_disk probe(probe_dir.string(), compat, 0, false);
+        t.assert_true("refused write, probe", probe.save(newer));
+        const auto name = probe.get_entries().front().name;
+        server_prompt_cache_disk disk(case_dir.string(), compat, probe.size(), false);
+        t.assert_true("refused write, seed", disk.save(older));
+        const auto before = disk.get_entries().front();
+        fs::create_directory(case_dir / (name + ".tmp"));
+        t.assert_true("refused write, refusal", !disk.save(newer));
+        t.assert_true("refused write, room made before write", !fs::exists(case_dir / before.name));
+        t.assert_equal("refused write, eviction before failure", (uint64_t) 1, disk.get_stats().n_evictions);
+    }
+
+    for (bool size_limit : { false, true }) {
+        for (bool reserve : { false, true }) {
+            for (const std::string mode : { "save", "flush", "writer", "queued-flush" }) {
+                const auto case_dir = dir / ("recency-" + std::to_string(size_limit) + std::to_string(reserve) + mode);
+                fs::create_directories(case_dir);
+                auto a = make_cache_state(n_tok, 1, 1000);
+                auto b = make_cache_state(n_tok, 2, 1000);
+                a.t_used = fs::file_time_type{} + std::chrono::seconds(2);
+                b.t_used = fs::file_time_type{} + std::chrono::seconds(4);
+                server_prompt_cache_disk seed(case_dir.string(), compat, 0, false);
+                t.assert_true("recency, seed a", seed.save(a));
+                t.assert_true("recency, seed b", seed.save(b));
+                const auto before = seed.get_entries();
+                const size_t limit = seed.size();
+                const bool bounded = size_limit || reserve;
+                size_t n_candidates = 0;
+                for (int age : { 1, 2, 3, 5 }) {
+                    ++n_candidates;
+                    auto candidate = make_cache_state(n_tok, 3 + age, age == 3 ? 2500 : 1000);
+                    candidate.t_used = fs::file_time_type{} + std::chrono::seconds(age);
+                    {
+                        server_prompt_cache_disk disk(case_dir.string(), compat, size_limit ? limit : 0, false,
+                                reserve ? 1 : 0, mode == "writer" || mode == "queued-flush" ? 4096 : 0, false, 1);
+                        if (mode == "save") {
+                            t.assert_true("recency, direct result", disk.save(candidate) == (!bounded || age == 5));
+                        } else if (mode == "flush") {
+                            std::list<server_prompt_cache_state> states;
+                            states.push_back(std::move(candidate));
+                            disk.flush(states);
+                        } else {
+                            disk.enqueue(std::move(candidate));
+                            if (mode == "queued-flush") {
+                                disk.flush({});
+                            }
+                            // Destruction joins the writer in the writer-only case.
+                        }
+                    }
+                    server_prompt_cache_disk scanned(case_dir.string(), compat, 0, false);
+                    if (bounded && age < 5) {
+                        t.assert_equal("recency, refusal preserves count", before.size(), scanned.get_entries().size());
+                        for (const auto & entry : before) {
+                            std::error_code ec;
+                            t.assert_true("recency, refusal preserves file", fs::exists(case_dir / entry.name));
+                            t.assert_true("recency, refusal preserves time", fs::last_write_time(case_dir / entry.name, ec) == entry.t_used);
+                        }
+                    } else if (bounded) {
+                        t.assert_equal("recency, normal eviction count", (size_t) 2, scanned.get_entries().size());
+                        t.assert_true("recency, normal eviction removes oldest", !fs::exists(case_dir / before.front().name));
+                    } else {
+                        t.assert_equal("recency, unlimited saves", 2 + n_candidates, scanned.get_entries().size());
+                    }
+                }
+            }
+        }
+    }
+
+    for (bool reserve : { false, true }) {
+        const auto case_dir = dir / ("refused-prefix-" + std::to_string(reserve));
+        fs::create_directories(case_dir);
+        auto shorter = make_cache_state(n_tok, 1, 1000);
+        auto longer = make_cache_state(n_tok, 1, 1200);
+        auto kept = make_cache_state(n_tok, 2, 1000);
+        longer.prompt.tokens.push_back(3);
+        shorter.t_used = fs::file_time_type{} + std::chrono::seconds(1);
+        longer.t_used  = fs::file_time_type{} + std::chrono::seconds(2);
+        kept.t_used    = fs::file_time_type{} + std::chrono::seconds(3);
+        server_prompt_cache_disk seed(case_dir.string(), compat, 0, false);
+        t.assert_true("refused prefix, seed shorter", seed.save(shorter));
+        t.assert_true("refused prefix, seed kept", seed.save(kept));
+        const auto before = seed.get_entries();
+        server_prompt_cache_disk disk(case_dir.string(), compat, reserve ? seed.size() + 1000 : seed.size(), false, reserve ? 1 : 0, 0, false, 1);
+        if (reserve) {
+            std::list<server_prompt_cache_state> states;
+            states.push_back(std::move(longer));
+            states.push_back(std::move(kept));
+            disk.flush(states);
+        } else {
+            t.assert_true("refused prefix, direct refusal", !disk.save(longer));
+        }
+        t.assert_equal("refused prefix, count", before.size(), disk.get_entries().size());
+        for (const auto & entry : before) {
+            t.assert_true("refused prefix, file remains", fs::exists(case_dir / entry.name));
+        }
+        t.assert_equal("refused prefix, no writes", (uint64_t) 0, disk.get_stats().n_saves);
+    }
+
+    for (bool size_limit : { false, true }) {
+        const auto case_dir = dir / ("touch-monotonic-" + std::to_string(size_limit));
+        fs::create_directories(case_dir);
+        auto cur = make_cache_state(n_tok, 1, 1000);
+        cur.t_used = fs::file_time_type{} + std::chrono::seconds(2);
+        server_prompt_cache_disk disk(case_dir.string(), compat, size_limit ? 4000 : 0, false);
+        t.assert_true("touch monotonic, seed", disk.save(cur));
+        const auto path = case_dir / disk.get_entries().front().name;
+        const auto expected = cur.t_used;
+        cur.t_used -= std::chrono::seconds(1);
+        t.assert_true("touch monotonic, older save", disk.save(cur));
+        t.assert_true("touch monotonic, time unchanged", fs::last_write_time(path) == expected);
+        server_prompt_cache_disk other(case_dir.string(), compat, 0, false);
+        cur.t_used = expected + std::chrono::seconds(1);
+        t.assert_true("touch monotonic, other server", other.save(cur));
+        cur.t_used = expected;
+        std::list<server_prompt_cache_state> states;
+        states.push_back(std::move(cur));
+        disk.flush(states);
+        t.assert_true("touch monotonic, shared time unchanged", fs::last_write_time(path) == expected + std::chrono::seconds(1));
+        t.assert_equal("touch monotonic, no rewrite", (uint64_t) 1, disk.get_stats().n_saves);
+    }
+
+    for (size_t limit : { (size_t) 0, (size_t) 4000 }) {
+        const auto case_dir = dir / ("touch-queued-" + std::to_string(limit));
+        fs::create_directories(case_dir);
+        server_prompt_cache cache(0, 0);
+        cache.disk = std::make_unique<server_prompt_cache_disk>(case_dir.string(), compat, limit, false, 0, 4096);
+        common_file_lock held((case_dir / ".lock").string());
+        t.assert_true("touch queued, lock", held.acquire());
+        auto older = make_cache_state(n_tok, 1, 1000);
+        auto newer = make_cache_state(n_tok, 1, 1000);
+        older.t_used = fs::file_time_type{} + std::chrono::seconds(1);
+        newer.t_used = fs::file_time_type{} + std::chrono::seconds(2);
+        const auto expected = newer.t_used;
+        cache.disk->enqueue(std::move(newer));
+        cache.states.push_back(std::move(older));
+        held.close();
+        cache.flush_to_disk();
+        const auto entries = cache.disk->get_entries();
+        t.assert_equal("touch queued, one file", (size_t) 1, entries.size());
+        t.assert_true("touch queued, newest time", entries.front().t_used == expected);
+        t.assert_true("touch queued, filesystem time", fs::last_write_time(case_dir / entries.front().name) == expected);
+        t.assert_equal("touch queued, no rewrite", (uint64_t) 1, cache.disk->get_stats().n_saves);
+    }
+
     for (size_t n_files = 1; n_files <= 3; ++n_files) {
         const auto stamp_dir = dir / ("stamp-" + std::to_string(n_files));
         fs::create_directories(stamp_dir);
