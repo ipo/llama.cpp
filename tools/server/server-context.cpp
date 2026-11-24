@@ -1174,12 +1174,12 @@ private:
     void handle_sleeping_state(bool new_state) {
         GGML_ASSERT(sleeping != new_state);
         if (new_state) {
+            SRV_INF("%s", "server is entering sleeping state\n");
+            destroy();
             if (callback_state) {
                 callback_state(SERVER_STATE_SLEEPING, {});
                 // note: for sleeping == false, event is emitted by load_model()
             }
-            SRV_INF("%s", "server is entering sleeping state\n");
-            destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
             if (!load_model(params_base)) {
