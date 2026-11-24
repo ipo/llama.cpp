@@ -666,6 +666,7 @@ struct common_params {
     std::string cache_disk_path;             // directory of the disk prompt cache, empty = disabled
     int32_t cache_disk_max_size_mib = -1;       // -1 = no limit
     int32_t cache_disk_min_free_mib = 0;        // minimum free space to keep on the cache filesystem
+    int32_t cache_disk_queue_mib = 0;           // 0 = synchronous writes
 
     // llama-connect params
     bool        server_connect      = false;
