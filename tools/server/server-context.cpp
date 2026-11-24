@@ -341,7 +341,7 @@ struct server_slot {
 
     server_prompt prompt;
 
-    bool prompt_save(server_prompt_cache & prompt_cache) const {
+    bool prompt_save(server_prompt_cache & prompt_cache, std::filesystem::file_time_type t_used = std::filesystem::file_time_type::clock::now()) const {
         if (prompt.tokens.size() == 0) {
             return false;
         }
@@ -367,6 +367,7 @@ struct server_slot {
             return false;
         }
 
+        cur->t_used = t_used;
         return true;
     }
 
@@ -1144,9 +1145,13 @@ private:
             return;
         }
 
+        // Convert the monotonic slot times to the file clock with one shared snapshot.
+        const auto t_now = std::filesystem::file_time_type::clock::now();
+        const auto t_now_us = ggml_time_us();
         for (auto & slot : slots) {
             if (!slot.is_processing()) {
-                slot.prompt_save(*prompt_cache);
+                const auto age = std::chrono::microseconds(t_now_us - slot.t_last_used);
+                slot.prompt_save(*prompt_cache, t_now - std::chrono::duration_cast<std::filesystem::file_time_type::duration>(age));
             }
         }
 
