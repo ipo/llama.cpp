@@ -171,6 +171,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--cache-disk-max-size N` | set the maximum size of the disk prompt cache directory in MiB, the oldest files are removed first (default: -1, -1 - no limit)<br/>(env: LLAMA_ARG_CACHE_DISK_MAX_SIZE) |
 | `--cache-disk-min-free N` | keep at least this much free space on the disk prompt cache filesystem in MiB (default: 0)<br/>(env: LLAMA_ARG_CACHE_DISK_MIN_FREE) |
 | `--cache-disk-queue N` | set the maximum size in MiB of prompts waiting for the background disk cache writer (default: 0, 0 - synchronous writes)<br/>(env: LLAMA_ARG_CACHE_DISK_QUEUE) |
+| `--cache-disk-queue-drop, --no-cache-disk-queue-drop` | drop the oldest waiting prompts instead of waiting for room in the disk cache queue (default: disabled, requires cache-disk-queue)<br/>(env: LLAMA_ARG_CACHE_DISK_QUEUE_DROP) |
 | `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)<br/>(env: LLAMA_ARG_KV_UNIFIED) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)<br/>(env: LLAMA_ARG_CACHE_IDLE_SLOTS) |
 | `--context-shift, --no-context-shift` | whether to use context shift on infinite text generation (default: disabled)<br/>(env: LLAMA_ARG_CONTEXT_SHIFT) |
@@ -360,7 +361,8 @@ llama-server -m model.gguf --cache-disk /path/to/cache --cache-disk-max-size 327
 ```
 
 - **Saving:** a prompt is saved when the RAM cache drops it, and when the server shuts down or goes to sleep (idle slots included, newest prompts first). A server that is killed loses the prompts that were only in RAM.
-- **Background writes:** `--cache-disk-queue N` enables one writer thread, with up to `N` MiB of prompt states waiting or being written, separate from `--cache-ram`. An empty queue accepts one prompt of any size; otherwise, an eviction waits for room and never drops a prompt. Queued prompts can still be loaded. Shutdown and sleep wait for the writes to finish. The default is `0`, which keeps synchronous writes.
+- **Background writes:** `--cache-disk-queue N` enables one writer thread, with up to `N` MiB of prompt states waiting or being written, separate from `--cache-ram`. An empty queue accepts one prompt of any size; otherwise, an eviction waits for room and never drops a prompt by default. Queued prompts can still be loaded. Shutdown and sleep wait for the writes to finish. The default is `0`, which keeps synchronous writes.
+- **Queue drops:** `--cache-disk-queue-drop` makes an eviction drop the oldest waiting prompts until the new state fits or none are left, then accept it without waiting. A state being written is never dropped. Dropped prompts are not saved. This is disabled by default and has no effect without `--cache-disk-queue`. Shutdown and sleep still flush all remaining states without queue drops.
 - **Loading:** for each request, the saved prompt that shares the longest prefix with it is loaded, if it shares more than the slot and the RAM cache do. It does not need to be a full prefix: the state is cut where the prompts differ. Context checkpoints are saved too.
 - **Size:** a file is about as large as the same prompt in the RAM cache. With `--cache-disk-max-size N`, the least recently used files are removed to stay under `N` MiB. `--cache-disk-min-free N` also keeps at least `N` MiB free on the filesystem that holds the cache. There is no size limit by default.
 - **Compatibility:** a file is only used with the same model, mmproj, draft model, LoRA adapters, control vectors, KV cache types, `--swa-full` and RoPE/YaRN options. Other files are ignored, but they count in the size limit.
@@ -369,7 +371,7 @@ llama-server -m model.gguf --cache-disk /path/to/cache --cache-disk-max-size 327
 Notes:
 
 - The files hold the prompt tokens as they are, so anyone who can read the directory can read the prompts.
-- While a large state is read, the other requests wait. Writes also block requests unless `--cache-disk-queue` is enabled; a full queue or a load of the state being written still waits for the writer.
+- While a large state is read, the other requests wait. Writes also block requests unless `--cache-disk-queue` is enabled; a full queue still waits unless `--cache-disk-queue-drop` is enabled. A load of the state being written still waits for the writer.
 - Several servers can share the directory, for example the models of a router, and `--cache-disk-max-size` then applies to all of them together. They take turns: while one reads or writes a file, the others wait.
 - In router mode, a model that is unloaded has `stop-timeout` seconds to save its prompts.
 - With `--metrics`, see the `llamacpp:prompt_cache_disk_*` metrics in [`/metrics`](#get-metrics-prometheus-compatible-metrics-exporter).
@@ -1287,6 +1289,7 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 | `llamacpp:prompt_cache_disk_load_bytes_total` | Counter | Number of bytes read from the disk prompt cache. |
 | `llamacpp:prompt_cache_disk_load_seconds_total` | Counter | Time spent loading prompts from the disk prompt cache in seconds. |
 | `llamacpp:prompt_cache_disk_evictions_total` | Counter | Number of files removed from the disk prompt cache to stay under `--cache-disk-max-size`. |
+| `llamacpp:prompt_cache_disk_drops_total` | Counter | Number of states dropped from the disk prompt cache write queue. |
 | `llamacpp:prompt_cache_disk_files` | Gauge | Number of files in the disk prompt cache directory, the files of other models included. |
 | `llamacpp:prompt_cache_disk_bytes` | Gauge | Size of the disk prompt cache directory in bytes, the files of other models included. |
 | `llamacpp:prompt_cache_disk_pending_bytes` | Gauge | Size of states waiting for or being written to the disk prompt cache in bytes. |

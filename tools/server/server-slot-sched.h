@@ -105,7 +105,7 @@ struct server_prompt_cache_disk {
     // compat: 16 hex chars, changes when the saved states can no longer be used (other model, mmproj, etc.)
     // limit_size: in bytes, 0 = no limit
     // queue_limit: in bytes, 0 = synchronous writes
-    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0);
+    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, bool queue_drop = false);
     ~server_prompt_cache_disk();
 
     // the files as of the last operation, another server can change them at any time
@@ -171,6 +171,7 @@ private:
     std::condition_variable condition;
     std::list<server_prompt_cache_state> queue;
     size_t queue_limit;
+    bool queue_drop;
     size_t queue_size = 0;
     server_prompt_cache_state * writing = nullptr;
     bool writing_taken = false;

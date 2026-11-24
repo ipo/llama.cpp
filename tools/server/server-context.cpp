@@ -1635,7 +1635,7 @@ private:
                 SRV_WRN("%s", "--cache-disk is experimental, its behavior and file format can change in the future\n");
 
                 prompt_cache->disk = std::make_unique<server_prompt_cache_disk>(
-                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base), limit_size, mctx != nullptr, min_free_size, 1024ull * 1024ull * params_base.cache_disk_queue_mib);
+                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base), limit_size, mctx != nullptr, min_free_size, 1024ull * 1024ull * params_base.cache_disk_queue_mib, params_base.cache_disk_queue_drop);
             }
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");

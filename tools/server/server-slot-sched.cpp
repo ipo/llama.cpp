@@ -195,8 +195,8 @@ static server_cache_disk_header read_header(std::ifstream & in, const std::strin
     return header;
 }
 
-server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size, size_t queue_limit)
-        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()), queue_limit(queue_limit) {
+server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size, size_t queue_limit, bool queue_drop)
+        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()), queue_limit(queue_limit), queue_drop(queue_drop) {
     server_cache_disk_lock guard(lock);
     refresh();
 
@@ -247,7 +247,22 @@ void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
                 ++it;
             }
         }
-        return queue_size == 0 || (size <= queue_limit && queue_size <= queue_limit - size);
+        const auto fits = [&] {
+            return queue_size == 0 || (size <= queue_limit && queue_size <= queue_limit - size);
+        };
+        if (queue_drop) {
+            for (auto it = queue.begin(); it != queue.end() && !fits();) {
+                if (&*it == writing) {
+                    ++it;
+                    continue;
+                }
+                queue_size -= it->size();
+                it = queue.erase(it);
+                ++stats.n_drops;
+            }
+            return true;
+        }
+        return fits();
     });
     queue.push_back(std::move(state));
     queue_size += size;
