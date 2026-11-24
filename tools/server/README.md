@@ -1289,6 +1289,7 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 | `llamacpp:prompt_cache_disk_evictions_total` | Counter | Number of files removed from the disk prompt cache to stay under `--cache-disk-max-size`. |
 | `llamacpp:prompt_cache_disk_files` | Gauge | Number of files in the disk prompt cache directory, the files of other models included. |
 | `llamacpp:prompt_cache_disk_bytes` | Gauge | Size of the disk prompt cache directory in bytes, the files of other models included. |
+| `llamacpp:prompt_cache_disk_pending_bytes` | Gauge | Size of states waiting for or being written to the disk prompt cache in bytes. |
 | `llamacpp:spec_decode_num_accepted_tokens_per_pos_total` | Counter | Accepted tokens per draft position (labeled `position="N"`; absent when spec-decode is off or before the first completed speculative request). |
 
 ### POST `/slots/{id_slot}?action=save`: Save the prompt cache of the specified slot to a file.
