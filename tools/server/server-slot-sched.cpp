@@ -235,6 +235,18 @@ void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
     const size_t size = state.size();
     std::unique_lock<std::mutex> guard(mutex_queue);
     condition.wait(guard, [&] {
+        const auto & tokens = state.prompt.tokens;
+        for (auto it = queue.begin(); it != queue.end();) {
+            const auto & queued_tokens = it->prompt.tokens;
+            const size_t n_tokens = queued_tokens.size();
+            if (&*it != writing && n_tokens < tokens.size() && tokens.get_hash(n_tokens) == queued_tokens.get_hash(n_tokens)) {
+                queue_size -= it->size();
+                it = queue.erase(it);
+                condition.notify_all();
+            } else {
+                ++it;
+            }
+        }
         return queue_size == 0 || (size <= queue_limit && queue_size <= queue_limit - size);
     });
     queue.push_back(std::move(state));
