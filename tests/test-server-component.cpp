@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <regex>
 #include <string>
@@ -310,6 +311,14 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_true("get_hash, other last token", tokens.get_hash(n_tok) != other.prompt.tokens.get_hash(n_tok));
         t.assert_true("get_hash, other length",     tokens.get_hash(n_tok) != tokens.get_hash(n_tok - 1));
         t.assert_true("get_hash, not a chain hash", tokens.get_hash(n_blk) != tokens.get_prefix_hashes()[0]);
+    }
+
+    {
+        const fs::path reserve_dir = dir / "reserve";
+        fs::create_directories(reserve_dir);
+        server_prompt_cache_disk disk(reserve_dir.string(), compat, 0, false, std::numeric_limits<size_t>::max());
+        t.assert_true("save with impossible free space reserve", !disk.save(state));
+        t.assert_equal("no file with impossible free space reserve", (size_t) 0, disk.get_entries().size());
     }
 
     {
