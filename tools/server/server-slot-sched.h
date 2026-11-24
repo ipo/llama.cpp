@@ -5,6 +5,7 @@
 
 #include "file-lock.h"
 
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <list>
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 // which prompt goes to which slot: slot prompt state, prompt cache and slot selection
@@ -87,7 +89,7 @@ struct server_prompt_cache_state {
 
 // prompt cache on disk, one file per prompt in a flat directory: {compat}-{prompt hash}.cache
 // file: header | hash chain | tokens | state | draft state | checkpoints
-// the directory can be shared by many servers, every operation holds a lock on it
+// the directory can be shared by many servers, file operations hold a lock on it
 
 struct server_prompt_cache_disk_entry {
     std::string name;
@@ -105,7 +107,9 @@ struct server_prompt_cache_disk_entry {
 struct server_prompt_cache_disk {
     // compat: 16 hex chars, changes when the saved states can no longer be used (other model, mmproj, etc.)
     // limit_size: in bytes, 0 = no limit
-    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, std::optional<std::uintmax_t> space_available_override = std::nullopt);
+    // queue_limit: in bytes, 0 = synchronous writes
+    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, std::optional<std::uintmax_t> space_available_override = std::nullopt);
+    ~server_prompt_cache_disk();
 
     // the files as of the last operation, another server can change them at any time
     std::list<server_prompt_cache_disk_entry> get_entries() const;
@@ -116,6 +120,9 @@ struct server_prompt_cache_disk {
 
     // replaces saved prefixes and evicts older unprotected files only if the new prompt fits
     bool save(const server_prompt_cache_state & state);
+
+    // moves an evicted state to the writer, or saves it synchronously when the queue is disabled
+    void enqueue(server_prompt_cache_state && state);
 
     // writes newest first, keeping each state's recency time
     void flush(const std::list<server_prompt_cache_state> & states);
@@ -130,7 +137,7 @@ private:
 
     size_t size_impl() const;
 
-    // the lock must be held; keep lists files reserved for this flush
+    // the disk operation and directory locks must be held; keep lists files reserved for this flush
     bool save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep);
 
     // reads the directory again, the lock must be held
@@ -147,6 +154,8 @@ private:
     // stamps the file and keeps entries ordered oldest first
     void touch(entry_list::iterator it, std::filesystem::file_time_type t_used);
 
+    void writer_loop();
+
     std::filesystem::path dir;
     std::string compat;
     size_t limit_size;
@@ -157,9 +166,20 @@ private:
     // oldest first
     entry_list entries;
 
-    // take mutex before the directory lock
-    mutable std::mutex mutex;
+    // serializes disk operations, taken before the directory lock
+    std::mutex mutex;
     common_file_lock lock;
+
+    // protects the queue, entries and stats; not held during a write or a wait for the directory lock
+    mutable std::mutex mutex_queue;
+    std::condition_variable condition;
+    std::list<server_prompt_cache_state> queue;
+    size_t queue_limit;
+    size_t queue_size = 0;
+    server_prompt_cache_state * writing = nullptr;
+    bool writing_taken = false;
+    bool stopping = false;
+    std::thread writer;
 
     server_prompt_cache_disk_stats stats;
 };
@@ -199,7 +219,7 @@ struct server_prompt_cache {
     void flush_to_disk();
 
 private:
-    void save_to_disk(const server_prompt_cache_state & state);
+    void save_to_disk(server_prompt_cache_state && state);
 
     void pop_oldest();
 
