@@ -307,8 +307,8 @@ Call stack on entering sleeping:
 - `cb0(true)` --> `server_routes::update_cached_responses`
     - snapshots `/props`, `/models` and metrics; the model is still alive here
 - `cb1(true)` --> `server_context_impl::handle_sleeping_state`
-    - `callback_state(SERVER_STATE_SLEEPING)` --> reported to router in child mode
     - `destroy()` --> frees `llama_context` and `mtmd_context`
+    - `callback_state(SERVER_STATE_SLEEPING)` --> reported to router in child mode
 - `condition_tasks.wait` until `req_stop_sleeping`
 
 Call stack on waking up:
