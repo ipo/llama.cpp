@@ -601,6 +601,17 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         }
     }
 
+    for (auto it : obsolete) {
+        SRV_TRC(" - removing obsolete prompt with length %zu from disk, '%s'\n", it->n_tokens, it->name.c_str());
+        remove(it);
+    }
+    for (auto it : evictions) {
+        SRV_TRC(" - making room on disk, removing oldest file '%s' (size = %.3f MiB)\n",
+                it->name.c_str(), it->size / (1024.0 * 1024.0));
+        remove(it);
+        stats.n_evictions++;
+    }
+
     guard.unlock();
     const int64_t t_start = ggml_time_us();
 
@@ -657,17 +668,6 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
     }
 
     guard.lock();
-    // Keep existing files until all checks and the new write succeed.
-    for (auto it : obsolete) {
-        SRV_TRC(" - removing obsolete prompt with length %zu from disk, '%s'\n", it->n_tokens, it->name.c_str());
-        remove(it);
-    }
-    for (auto it : evictions) {
-        SRV_TRC(" - making room on disk, removing oldest file '%s' (size = %.3f MiB)\n",
-                it->name.c_str(), it->size / (1024.0 * 1024.0));
-        remove(it);
-        stats.n_evictions++;
-    }
     server_prompt_cache_disk_entry entry;
     entry.name     = name;
     entry.size     = size_file;

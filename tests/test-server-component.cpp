@@ -502,8 +502,8 @@ static void test_server_prompt_cache_disk(testing & t) {
         const auto before = disk.get_entries().front();
         fs::create_directory(case_dir / (name + ".tmp"));
         t.assert_true("refused write, refusal", !disk.save(newer));
-        t.assert_true("refused write, old file remains", fs::exists(case_dir / before.name));
-        t.assert_equal("refused write, no eviction", (uint64_t) 0, disk.get_stats().n_evictions);
+        t.assert_true("refused write, room made before write", !fs::exists(case_dir / before.name));
+        t.assert_equal("refused write, eviction before failure", (uint64_t) 1, disk.get_stats().n_evictions);
     }
 
     for (bool size_limit : { false, true }) {
