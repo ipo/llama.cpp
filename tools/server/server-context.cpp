@@ -1633,13 +1633,14 @@ private:
 
             if (!params_base.cache_disk_path.empty()) {
                 const size_t limit_size = 1024ull*1024ull*(params_base.cache_disk_max_size_mib < 0 ? 0 : params_base.cache_disk_max_size_mib);
+                const size_t min_free_size = 1024ull*1024ull*params_base.cache_disk_min_free_mib;
 
                 lora_init = params_base.lora_adapters;
 
                 SRV_WRN("%s", "--cache-disk is experimental, its behavior and file format can change in the future\n");
 
                 prompt_cache->disk = std::make_unique<server_prompt_cache_disk>(
-                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base, llama_n_ctx_seq(ctx_tgt), llama_n_seq_max(ctx_tgt), ctx_dft != nullptr), limit_size, mctx != nullptr);
+                        params_base.cache_disk_path, server_prompt_cache_disk_compat(params_base, llama_n_ctx_seq(ctx_tgt), llama_n_seq_max(ctx_tgt), ctx_dft != nullptr), limit_size, mctx != nullptr, min_free_size);
             }
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
