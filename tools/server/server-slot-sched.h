@@ -113,6 +113,9 @@ struct server_prompt_cache_disk {
     // removes the saved prompts that are a prefix of this one, then the oldest files if over the limit
     bool save(const server_prompt_cache_state & state);
 
+    // writes newest first, then restores the recency order without rewriting data
+    void flush(const std::list<server_prompt_cache_state> & states);
+
     // loads the saved prompt that shares the longest prefix with the tokens
     // n_prefix_min: the saved prompt must share more tokens than this
     // n_tokens_max: longer saved prompts are skipped
@@ -120,6 +123,9 @@ struct server_prompt_cache_disk {
 
 private:
     using entry_list = std::list<server_prompt_cache_disk_entry>;
+
+    // the lock must be held; keep lists files reserved for this flush
+    bool save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep);
 
     // reads the directory again, the lock must be held
     void refresh();
