@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -107,7 +108,7 @@ struct server_prompt_cache_disk {
     server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, std::optional<std::uintmax_t> space_available_override = std::nullopt);
 
     // the files as of the last operation, another server can change them at any time
-    const std::list<server_prompt_cache_disk_entry> & get_entries() const { return entries; }
+    std::list<server_prompt_cache_disk_entry> get_entries() const;
 
     size_t size() const;
 
@@ -126,6 +127,8 @@ struct server_prompt_cache_disk {
 
 private:
     using entry_list = std::list<server_prompt_cache_disk_entry>;
+
+    size_t size_impl() const;
 
     // the lock must be held; keep lists files reserved for this flush
     bool save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep);
@@ -154,6 +157,8 @@ private:
     // oldest first
     entry_list entries;
 
+    // take mutex before the directory lock
+    mutable std::mutex mutex;
     common_file_lock lock;
 
     server_prompt_cache_disk_stats stats;

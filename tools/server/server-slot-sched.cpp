@@ -205,7 +205,7 @@ server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, cons
     });
 
     SRV_INF("disk prompt cache '%s': %zu prompts, %zu files of other models, %.3f MiB (limit: %.3f MiB)\n",
-            this->dir.string().c_str(), n_usable, entries.size() - n_usable, size() / (1024.0 * 1024.0), limit_size / (1024.0 * 1024.0));
+            this->dir.string().c_str(), n_usable, entries.size() - n_usable, size_impl() / (1024.0 * 1024.0), limit_size / (1024.0 * 1024.0));
 }
 
 void server_prompt_cache_disk::refresh() {
@@ -267,6 +267,16 @@ void server_prompt_cache_disk::refresh() {
 }
 
 size_t server_prompt_cache_disk::size() const {
+    std::lock_guard<std::mutex> guard(mutex);
+    return size_impl();
+}
+
+std::list<server_prompt_cache_disk_entry> server_prompt_cache_disk::get_entries() const {
+    std::lock_guard<std::mutex> guard(mutex);
+    return entries;
+}
+
+size_t server_prompt_cache_disk::size_impl() const {
     size_t res = 0;
 
     for (const auto & entry : entries) {
@@ -277,9 +287,10 @@ size_t server_prompt_cache_disk::size() const {
 }
 
 server_prompt_cache_disk_stats server_prompt_cache_disk::get_stats() const {
+    std::lock_guard<std::mutex> guard(mutex);
     server_prompt_cache_disk_stats res = stats;
     res.n_files = entries.size();
-    res.size    = size();
+    res.size    = size_impl();
     return res;
 }
 
@@ -310,12 +321,14 @@ void server_prompt_cache_disk::touch(entry_list::iterator it, fs::file_time_type
 }
 
 bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
+    std::lock_guard<std::mutex> guard_mutex(mutex);
     server_cache_disk_lock guard(lock);
     refresh();
     return save_impl(state, {});
 }
 
 void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> & states) {
+    std::lock_guard<std::mutex> guard_mutex(mutex);
     server_cache_disk_lock guard(lock);
     refresh();
 
@@ -400,7 +413,7 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         if (ec) {
             SRV_WRN("failed to read free space for disk prompt cache '%s': %s\n", dir.string().c_str(), ec.message().c_str());
         } else {
-            const size_t size_current = size();
+            const size_t size_current = size_impl();
             const size_t size_available_clamped = size_available > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : (size_t) size_available;
             size_t limit_free;
             if (size_available_clamped >= min_free_size) {
@@ -431,7 +444,7 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
 
     std::vector<entry_list::iterator> obsolete;
     std::vector<entry_list::iterator> evictions;
-    size_t size_remaining = size();
+    size_t size_remaining = size_impl();
     for (auto it = entries.begin(); it != entries.end(); ++it) {
         if (0 < it->n_tokens && it->n_tokens < tokens.size() && tokens.get_hash(it->n_tokens) == it->hash &&
                 std::find(keep.begin(), keep.end(), it->name) == keep.end()) {
@@ -566,6 +579,7 @@ server_prompt_cache_disk::entry_list::iterator server_prompt_cache_disk::find(co
 }
 
 bool server_prompt_cache_disk::load(const server_tokens & tokens, size_t n_prefix_min, size_t n_tokens_max, server_prompt_cache_state & state) {
+    std::lock_guard<std::mutex> guard_mutex(mutex);
     // the lock is taken only if the files that are known so far have a match
     if (find(tokens, n_prefix_min, n_tokens_max) == entries.end()) {
         return false;

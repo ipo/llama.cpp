@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <random>
 #include <regex>
@@ -401,7 +402,7 @@ static void test_server_prompt_cache_disk(testing & t) {
         server_prompt_cache_disk disk(dir.string(), compat, 0, false);
         t.assert_equal("scan", (size_t) 1, disk.get_entries().size());
 
-        const auto & entry = disk.get_entries().front();
+        const auto entry = disk.get_entries().front();
         t.assert_equal("n_tokens", n_tok, entry.n_tokens);
         t.assert_true("hashes", entry.hashes == tokens.get_prefix_hashes());
 
@@ -466,7 +467,7 @@ static void test_server_prompt_cache_disk(testing & t) {
     {
         // a broken file is removed
         server_prompt_cache_disk disk(dir.string(), compat, 0, false);
-        const auto & entry = disk.get_entries().front();
+        const auto entry = disk.get_entries().front();
         const fs::path path = dir / entry.name;
         fs::resize_file(path, fs::file_size(path) - 1);
 
@@ -738,7 +739,7 @@ static void test_server_prompt_cache_disk(testing & t) {
             cache.flush_to_disk();
 
             const size_t n_expected = limit == 0 ? 3 : 2;
-            const auto & entries = cache.disk->get_entries();
+            const auto entries = cache.disk->get_entries();
             t.assert_equal("flush, file count", n_expected, entries.size());
             t.assert_equal("flush, saves", (uint64_t) n_expected, cache.disk->get_stats().n_saves);
             if (limit > 0) {
@@ -809,6 +810,69 @@ static void test_server_prompt_cache_disk(testing & t) {
         }
         cache.flush_to_disk();
         t.assert_equal("flush shared again, no writes", (uint64_t) 2, cache.disk->get_stats().n_saves);
+    }
+
+    {
+        const fs::path thread_dir = dir / "threads";
+        fs::create_directories(thread_dir);
+        server_prompt_cache_disk disk(thread_dir.string(), compat, 0, false);
+        const size_t n_rounds = 16;
+        t.assert_true("threads, seed", disk.save(make_cache_state(2 * n_blk, 0, 1000)));
+        const auto snapshot = disk.get_entries();
+        const auto stats_before = disk.get_stats();
+        const size_t size_file = snapshot.front().size;
+
+        std::promise<void> start;
+        const auto ready = start.get_future().share();
+        bool valid[2] = { true, true };
+        auto worker = [&](size_t id) {
+            ready.wait();
+            for (size_t i = 0; i < n_rounds; ++i) {
+                const auto cur = make_cache_state(2 * n_blk, (llama_token) (1 + id * n_rounds + i), 1000);
+                server_prompt_cache_state loaded;
+                valid[id] &= disk.save(cur);
+                valid[id] &= disk.save(cur);
+                valid[id] &= disk.load(cur.prompt.tokens, n_blk, 2 * n_blk, loaded);
+                valid[id] &= loaded.prompt.tokens.get_common_prefix(cur.prompt.tokens) == 2 * n_blk;
+                valid[id] &= loaded.data.main == cur.data.main && loaded.data.drft == cur.data.drft;
+
+                const auto stats = disk.get_stats();
+                valid[id] &= stats.n_files == stats.n_saves && stats.size == stats.n_files * size_file;
+                valid[id] &= stats.size_saved == stats.size && stats.size_loaded == stats.n_loads * size_file;
+                const auto entries = disk.get_entries();
+                for (const auto & entry : entries) {
+                    valid[id] &= entry.n_tokens == 2 * n_blk && entry.size == size_file;
+                }
+                valid[id] &= disk.size() >= entries.size() * size_file;
+            }
+        };
+        std::thread first(worker, 0);
+        std::thread second(worker, 1);
+        start.set_value();
+        first.join();
+        second.join();
+
+        t.assert_true("threads, operations and snapshots", valid[0] && valid[1]);
+        t.assert_equal("threads, old entries unchanged", (size_t) 1, snapshot.size());
+        t.assert_equal("threads, old stats unchanged", (uint64_t) 1, stats_before.n_saves);
+        const auto entries = disk.get_entries();
+        const auto stats = disk.get_stats();
+        t.assert_equal("threads, entries", 1 + 2 * n_rounds, entries.size());
+        t.assert_equal("threads, saves", (uint64_t) entries.size(), stats.n_saves);
+        t.assert_equal("threads, loads", (uint64_t) (2 * n_rounds), stats.n_loads);
+        t.assert_equal("threads, evictions", (uint64_t) 0, stats.n_evictions);
+        t.assert_equal("threads, files", (uint64_t) entries.size(), stats.n_files);
+        t.assert_equal("threads, bytes", (uint64_t) disk.size(), stats.size);
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const auto cur = make_cache_state(2 * n_blk, (llama_token) i, 1000);
+            const auto hash = cur.prompt.tokens.get_hash(2 * n_blk);
+            t.assert_equal("threads, saved hash", (size_t) 1, (size_t) std::count_if(entries.begin(), entries.end(), [&](const auto & entry) {
+                return entry.hash == hash;
+            }));
+        }
+        for (const auto & entry : entries) {
+            t.assert_equal("threads, file size", entry.size, (size_t) fs::file_size(thread_dir / entry.name));
+        }
     }
 
     fs::remove_all(dir);
