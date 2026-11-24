@@ -406,12 +406,15 @@ server_prompt_cache_disk::entry_list::iterator server_prompt_cache_disk::remove(
     return entries.erase(it);
 }
 
-void server_prompt_cache_disk::touch(entry_list::iterator it) {
+void server_prompt_cache_disk::touch(entry_list::iterator it, fs::file_time_type t_used) {
     std::error_code ec;
-    it->t_used = fs::file_time_type::clock::now();
-    fs::last_write_time(dir / it->name, it->t_used, ec);
+    fs::last_write_time(dir / it->name, t_used, ec);
+    it->t_used = fs::last_write_time(dir / it->name, ec);
 
-    entries.splice(entries.end(), entries, it);
+    const auto pos = std::find_if(entries.begin(), entries.end(), [&](const auto & entry) {
+        return entry.t_used > it->t_used;
+    });
+    entries.splice(pos, entries, it);
 }
 
 bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
@@ -474,27 +477,16 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     }
 
     // protect selected files before a newer state can evict them
-    std::vector<std::string> saved;
     for (const auto * state : selected) {
         if (save_impl(*state, keep)) {
-            const auto & name = entries.back().name;
+            const auto name = make_name(compat, state->prompt.tokens.get_hash(state->prompt.tokens.size()));
             if (std::find(keep.begin(), keep.end(), name) == keep.end()) {
                 keep.push_back(name);
-            }
-            if (std::find(saved.begin(), saved.end(), name) == saved.end()) {
-                saved.push_back(name);
             }
         }
     }
 
-    // restore oldest first with metadata updates only
     std::lock_guard<std::mutex> guard_queue(mutex_queue);
-    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
-        auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
-            return cur.name == *it;
-        });
-        touch(entry);
-    }
     queue_size -= size_queued;
     condition.notify_all();
 }
@@ -554,7 +546,7 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
     for (auto it = entries.begin(); it != entries.end();) {
         if (it->name == name) {
             SRV_TRC(" - prompt is already on disk, '%s'\n", name.c_str());
-            touch(it);
+            touch(it, state.t_used);
             return true;
         }
 
@@ -637,6 +629,8 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         return false;
     }
 
+    fs::last_write_time(path, state.t_used, ec);
+
     guard.lock();
     server_prompt_cache_disk_entry entry;
     entry.name     = name;
@@ -645,7 +639,10 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
     entry.n_tokens = tokens.size();
     entry.hash     = header.hash;
     entry.hashes   = hashes;
-    entries.push_back(std::move(entry));
+    const auto pos = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
+        return cur.t_used > entry.t_used;
+    });
+    entries.insert(pos, std::move(entry));
 
     stats.n_saves++;
     stats.size_saved += size_file;
@@ -802,7 +799,8 @@ bool server_prompt_cache_disk::read(entry_list::iterator it, server_prompt_cache
     stats.size_loaded += it->size;
     stats.t_load      += ggml_time_us() - t_start;
 
-    touch(it);
+    res.t_used = fs::file_time_type::clock::now();
+    touch(it, res.t_used);
 
     state = std::move(res);
 
@@ -1002,6 +1000,7 @@ void server_prompt_cache::load_from_disk(const server_tokens & tokens_new, size_
     server_prompt_cache_state state;
     if (disk->load(tokens_new, lcp_best, n_ctx_slot, state)) {
         SRV_DBG("%s", "__TEST_TAG_PROMPT_CACHE_DISK_LOAD__\n");
+        state.t_used = fs::file_time_type::clock::now();
         states.push_back(std::move(state));
     }
 }
