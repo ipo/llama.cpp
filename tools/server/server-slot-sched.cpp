@@ -277,6 +277,35 @@ void server_prompt_cache_disk::touch(entry_list::iterator it) {
 }
 
 bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
+    server_cache_disk_lock guard(lock);
+    refresh();
+    return save_impl(state, {});
+}
+
+void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> & states) {
+    server_cache_disk_lock guard(lock);
+    refresh();
+
+    std::vector<std::string> keep;
+    for (auto it = states.rbegin(); it != states.rend(); ++it) {
+        if (!it->prompt.lora_changed && save_impl(*it, keep)) {
+            const auto & name = entries.back().name;
+            if (std::find(keep.begin(), keep.end(), name) == keep.end()) {
+                keep.push_back(name);
+            }
+        }
+    }
+
+    // restore oldest first with metadata updates only
+    for (auto it = keep.rbegin(); it != keep.rend(); ++it) {
+        auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
+            return cur.name == *it;
+        });
+        touch(entry);
+    }
+}
+
+bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep) {
     const auto & tokens = state.prompt.tokens;
 
     // a prompt without a full hash block can never be found
@@ -319,9 +348,6 @@ bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
         return false;
     }
 
-    server_cache_disk_lock guard(lock);
-    refresh();
-
     for (auto it = entries.begin(); it != entries.end();) {
         if (it->name == name) {
             SRV_TRC(" - prompt is already on disk, '%s'\n", name.c_str());
@@ -329,7 +355,8 @@ bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
             return true;
         }
 
-        if (0 < it->n_tokens && it->n_tokens < tokens.size() && tokens.get_hash(it->n_tokens) == it->hash) {
+        if (0 < it->n_tokens && it->n_tokens < tokens.size() && tokens.get_hash(it->n_tokens) == it->hash &&
+                std::find(keep.begin(), keep.end(), it->name) == keep.end()) {
             SRV_TRC(" - removing obsolete prompt with length %zu from disk, '%s'\n", it->n_tokens, it->name.c_str());
             it = remove(it);
         } else {
@@ -338,10 +365,23 @@ bool server_prompt_cache_disk::save(const server_prompt_cache_state & state) {
     }
 
     if (limit_size > 0) {
+        size_t size_keep = 0;
+        for (const auto & entry : entries) {
+            if (std::find(keep.begin(), keep.end(), entry.name) != keep.end()) {
+                size_keep += entry.size;
+            }
+        }
+        if (size_keep > limit_size - size_file) {
+            return false;
+        }
+
         while (!entries.empty() && size() + size_file > limit_size) {
+            auto it = std::find_if(entries.begin(), entries.end(), [&](const auto & entry) {
+                return std::find(keep.begin(), keep.end(), entry.name) == keep.end();
+            });
             SRV_TRC(" - making room on disk, removing oldest file '%s' (size = %.3f MiB)\n",
-                    entries.front().name.c_str(), entries.front().size / (1024.0 * 1024.0));
-            remove(entries.begin());
+                    it->name.c_str(), it->size / (1024.0 * 1024.0));
+            remove(it);
             stats.n_evictions++;
         }
     }
@@ -701,8 +741,8 @@ void server_prompt_cache::save_to_disk(const server_prompt_cache_state & state) 
 }
 
 void server_prompt_cache::flush_to_disk() {
-    for (const auto & state : states) {
-        save_to_disk(state);
+    if (disk) {
+        disk->flush(states);
     }
 }
 
