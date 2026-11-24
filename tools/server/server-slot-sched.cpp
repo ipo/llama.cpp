@@ -195,8 +195,8 @@ static server_cache_disk_header read_header(std::ifstream & in, const std::strin
     return header;
 }
 
-server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size, size_t queue_limit, bool queue_drop)
-        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()), queue_limit(queue_limit), queue_drop(queue_drop) {
+server_prompt_cache_disk::server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size, size_t queue_limit, bool queue_drop, std::optional<std::uintmax_t> space_available_override)
+        : dir(dir), compat(compat), limit_size(limit_size), min_free_size(min_free_size), space_available_override(space_available_override), has_mtmd(has_mtmd), lock((this->dir / ".lock").string()), queue_limit(queue_limit), queue_drop(queue_drop) {
     server_cache_disk_lock guard(lock);
     refresh();
 
@@ -526,18 +526,18 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
     bool has_limit = limit_size > 0;
     if (min_free_size > 0) {
         std::error_code ec;
-        const auto space = fs::space(dir, ec);
+        const std::uintmax_t size_available = space_available_override ? *space_available_override : fs::space(dir, ec).available;
         if (ec) {
             SRV_WRN("failed to read free space for disk prompt cache '%s': %s\n", dir.string().c_str(), ec.message().c_str());
         } else {
             const size_t size_current = size_impl();
-            const size_t size_available = space.available > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : (size_t) space.available;
+            const size_t size_available_clamped = size_available > std::numeric_limits<size_t>::max() ? std::numeric_limits<size_t>::max() : (size_t) size_available;
             size_t limit_free;
-            if (size_available >= min_free_size) {
-                const size_t size_room = size_available - min_free_size;
+            if (size_available_clamped >= min_free_size) {
+                const size_t size_room = size_available_clamped - min_free_size;
                 limit_free = size_current > std::numeric_limits<size_t>::max() - size_room ? std::numeric_limits<size_t>::max() : size_current + size_room;
             } else {
-                const size_t size_deficit = min_free_size - size_available;
+                const size_t size_deficit = min_free_size - size_available_clamped;
                 limit_free = size_current > size_deficit ? size_current - size_deficit : 0;
             }
             limit_size = limit_size > 0 ? std::min(limit_size, limit_free) : limit_free;
