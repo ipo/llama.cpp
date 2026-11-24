@@ -416,6 +416,96 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_true("shared, tmp file removed", !fs::exists(path_tmp));
     }
 
+    for (size_t limit : { (size_t) 0, (size_t) 4000 }) {
+        for (bool existing : { false, true }) {
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+
+            server_prompt_cache cache(0, 0);
+            cache.disk = std::make_unique<server_prompt_cache_disk>(dir.string(), compat, limit, false);
+            for (llama_token last : { 1, 2, 3 }) {
+                cache.states.push_back(make_cache_state(n_tok, last, 1000));
+            }
+            if (existing) {
+                t.assert_true("flush, newest already on disk", cache.disk->save(cache.states.back()));
+            }
+
+            cache.flush_to_disk();
+
+            const size_t n_expected = limit == 0 ? 3 : 2;
+            const auto & entries = cache.disk->get_entries();
+            t.assert_equal("flush, file count", n_expected, entries.size());
+            t.assert_equal("flush, saves", (uint64_t) n_expected, cache.disk->get_stats().n_saves);
+            if (limit > 0) {
+                t.assert_true("flush, size limit", cache.disk->size() <= limit);
+                t.assert_true("flush, only two fit", entries.front().size * 3 > limit);
+            }
+
+            auto state_it = cache.states.begin();
+            if (limit > 0) {
+                ++state_it;
+            }
+            for (const auto & entry : entries) {
+                t.assert_true("flush, oldest first", entry.hash == state_it->prompt.tokens.get_hash(n_tok));
+                ++state_it;
+            }
+
+            // a new scan checks the file times, not just the in-memory order
+            server_prompt_cache_disk scanned(dir.string(), compat, limit, false);
+            auto entry_it = entries.begin();
+            for (const auto & entry : scanned.get_entries()) {
+                t.assert_equal("flush, file time order", entry_it->name, entry.name);
+                ++entry_it;
+            }
+
+            const auto n_saves = cache.disk->get_stats().n_saves;
+            cache.flush_to_disk();
+            t.assert_equal("flush again, no writes", n_saves, cache.disk->get_stats().n_saves);
+            t.assert_equal("flush again, file count", n_expected, cache.disk->get_entries().size());
+        }
+    }
+
+    for (size_t n_files : { (size_t) 3, (size_t) 2 }) {
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+
+        const auto oldest = make_cache_state(n_tok, 1, 1000);
+        std::string name_oldest;
+        size_t size_file;
+        {
+            server_prompt_cache_disk disk(dir.string(), compat, 0, false);
+            t.assert_true("flush shared, save oldest", disk.save(oldest));
+            name_oldest = disk.get_entries().back().name;
+            size_file = disk.get_entries().back().size;
+        }
+        {
+            server_prompt_cache_disk other(dir.string(), "fedcba9876543210", 0, false);
+            t.assert_true("flush shared, save other model", other.save(make_cache_state(n_tok, 4, 1000)));
+            const auto now = fs::file_time_type::clock::now();
+            fs::last_write_time(dir / name_oldest, now - std::chrono::hours(2));
+            fs::last_write_time(dir / other.get_entries().back().name, now - std::chrono::hours(1));
+        }
+
+        server_prompt_cache cache(0, 0);
+        cache.disk = std::make_unique<server_prompt_cache_disk>(dir.string(), compat, n_files * size_file, false);
+        for (llama_token last : { 1, 2, 3 }) {
+            cache.states.push_back(make_cache_state(n_tok, last, 1000));
+        }
+        cache.flush_to_disk();
+        t.assert_equal("flush shared, no rewrite", (uint64_t) 2, cache.disk->get_stats().n_saves);
+        t.assert_equal("flush shared, file count", n_files, cache.disk->get_entries().size());
+        auto state_it = cache.states.begin();
+        if (n_files == 2) {
+            ++state_it;
+        }
+        for (const auto & entry : cache.disk->get_entries()) {
+            t.assert_true("flush shared, oldest first", entry.hash == state_it->prompt.tokens.get_hash(n_tok));
+            ++state_it;
+        }
+        cache.flush_to_disk();
+        t.assert_equal("flush shared again, no writes", (uint64_t) 2, cache.disk->get_stats().n_saves);
+    }
+
     fs::remove_all(dir);
 }
 
