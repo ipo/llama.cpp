@@ -69,6 +69,7 @@ struct server_prompt_data {
 struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
+    std::filesystem::file_time_type t_used = std::filesystem::file_time_type::clock::now();
 
     size_t size() const {
         size_t res = data.size();
@@ -110,8 +111,11 @@ struct server_prompt_cache_disk {
 
     server_prompt_cache_disk_stats get_stats() const;
 
-    // removes the saved prompts that are a prefix of this one, then the oldest files if over the limit
+    // replaces saved prefixes and evicts older unprotected files only if the new prompt fits
     bool save(const server_prompt_cache_state & state);
+
+    // writes newest first, keeping each state's recency time
+    void flush(const std::list<server_prompt_cache_state> & states);
 
     // loads the saved prompt that shares the longest prefix with the tokens
     // n_prefix_min: the saved prompt must share more tokens than this
@@ -120,6 +124,9 @@ struct server_prompt_cache_disk {
 
 private:
     using entry_list = std::list<server_prompt_cache_disk_entry>;
+
+    // the lock must be held; keep lists files reserved for this flush
+    bool save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep);
 
     // reads the directory again, the lock must be held
     void refresh();
@@ -132,8 +139,8 @@ private:
 
     entry_list::iterator remove(entry_list::iterator it);
 
-    // marks the entry as the most recently used one
-    void touch(entry_list::iterator it);
+    // stamps the file and keeps entries ordered oldest first
+    void touch(entry_list::iterator it, std::filesystem::file_time_type t_used);
 
     std::filesystem::path dir;
     std::string compat;
