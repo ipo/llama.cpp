@@ -844,11 +844,23 @@ static void compat_add_file(std::string & buf, const std::string & path) {
     compat_add(buf, (int64_t)  (path.empty() ? 0 : fs::last_write_time(path, ec).time_since_epoch().count()));
 }
 
-std::string server_prompt_cache_disk_compat(const common_params & params, int32_t n_ctx_seq, int32_t n_seq_max, bool has_draft_context) {
+std::string server_prompt_cache_disk_compat(const common_params & params, int32_t n_ctx_seq, int32_t n_seq_max, int32_t n_ctx_seq_dft, bool has_draft_context) {
     std::string buf;
 
     compat_add(buf, (uint32_t) LLAMA_STATE_SEQ_VERSION);
     compat_add(buf, (uint64_t) server_tokens::hash_block_size);
+
+    compat_add(buf, (uint64_t) params.kv_overrides.size());
+    for (const auto & override : params.kv_overrides) {
+        compat_add(buf, (int32_t) override.tag);
+        compat_add(buf, std::string(override.key));
+        switch (override.tag) {
+            case LLAMA_KV_OVERRIDE_TYPE_INT:   compat_add(buf, override.val_i64); break;
+            case LLAMA_KV_OVERRIDE_TYPE_FLOAT: compat_add(buf, override.val_f64); break;
+            case LLAMA_KV_OVERRIDE_TYPE_BOOL:  compat_add(buf, (uint8_t) override.val_bool); break;
+            case LLAMA_KV_OVERRIDE_TYPE_STR:   compat_add(buf, std::string(override.val_str)); break;
+        }
+    }
 
     compat_add_file(buf, params.model.path);
     compat_add_file(buf, params.mmproj.path);
@@ -868,9 +880,13 @@ std::string server_prompt_cache_disk_compat(const common_params & params, int32_
 
     compat_add(buf, (int32_t) params.cache_type_k);
     compat_add(buf, (int32_t) params.cache_type_v);
+    compat_add(buf, (int32_t) params.attention_type);
+    compat_add(buf, (int32_t) params.speculative.draft.cache_type_k);
+    compat_add(buf, (int32_t) params.speculative.draft.cache_type_v);
     compat_add(buf, (uint8_t) params.swa_full);
     compat_add(buf, n_ctx_seq);
     compat_add(buf, n_seq_max);
+    compat_add(buf, n_ctx_seq_dft);
     compat_add(buf, (uint8_t) params.kv_unified);
     compat_add(buf, (int32_t) params.flash_attn_type);
     compat_add(buf, (uint64_t) params.speculative.types.size());
