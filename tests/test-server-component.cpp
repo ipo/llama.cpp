@@ -655,6 +655,69 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_equal("queue locked save, queue empty, loads use files", (uint64_t) 2, disk.get_stats().n_loads);
     }
 
+    for (const std::string kind : { "prefix", "unrelated", "shorter", "equal" }) {
+        const fs::path queue_dir = dir / ("queue-replace-" + kind);
+        fs::create_directories(queue_dir);
+        server_prompt_cache_disk disk(queue_dir.string(), compat, 0, false, 0, 4096);
+        common_file_lock held((queue_dir / ".lock").string());
+        t.assert_true("queue replace, lock", held.acquire());
+
+        auto a = make_cache_state(n_blk + 5, 100 + n_blk + 4, 1000);
+        auto b = make_cache_state(2 * n_blk, 2, 1000);
+        if (kind == "unrelated") {
+            b.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, 7), false);
+        } else if (kind == "shorter") {
+            std::swap(a, b);
+        } else if (kind == "equal") {
+            b.prompt.tokens = a.prompt.tokens.clone();
+        }
+        const auto hash_b = b.prompt.tokens.get_hash(b.prompt.tokens.size());
+        const auto n_saves = disk.get_stats().n_saves;
+        disk.enqueue(std::move(a));
+        disk.enqueue(std::move(b));
+        t.assert_equal("queue replace, no writes while locked", n_saves, disk.get_stats().n_saves);
+        held.close();
+        disk.flush({});
+
+        const size_t n_expected = kind == "prefix" || kind == "equal" ? 1 : 2;
+        t.assert_equal("queue replace " + kind + ", saves", n_saves + n_expected, disk.get_stats().n_saves);
+        const auto entries = disk.get_entries();
+        t.assert_equal("queue replace " + kind + ", files", n_expected, entries.size());
+        size_t n_files = 0;
+        for (const auto & file : fs::directory_iterator(queue_dir)) {
+            n_files += file.path().extension() == ".cache";
+        }
+        t.assert_equal("queue replace, actual files", n_expected, n_files);
+        bool found_b = false;
+        for (const auto & entry : entries) {
+            t.assert_true("queue replace, file exists", fs::exists(queue_dir / entry.name));
+            found_b |= entry.hash == hash_b;
+        }
+        t.assert_true("queue replace, B exists", found_b);
+    }
+
+    {
+        const fs::path queue_dir = dir / "queue-replace-size";
+        fs::create_directories(queue_dir);
+        auto a = make_cache_state(n_blk + 5, 100 + n_blk + 4, 1000);
+        auto b = make_cache_state(2 * n_blk, 2, 1000);
+        auto c = make_cache_state(2 * n_blk, 3, 1000);
+        server_prompt_cache_disk disk(queue_dir.string(), compat, 0, false, 0, b.size() + c.size());
+        common_file_lock held((queue_dir / ".lock").string());
+        t.assert_true("queue replace size, lock", held.acquire());
+
+        disk.enqueue(make_cache_state(n_blk + 5, 100 + n_blk + 4, 1000));
+        disk.enqueue(std::move(a));
+        // B removes both copies of A; C can then enter without waiting for a write.
+        disk.enqueue(std::move(b));
+        disk.enqueue(std::move(c));
+        t.assert_equal("queue replace size, no writes while locked", (uint64_t) 0, disk.get_stats().n_saves);
+        held.close();
+        disk.flush({});
+        t.assert_equal("queue replace size, saves", (uint64_t) 2, disk.get_stats().n_saves);
+        t.assert_equal("queue replace size, files", (size_t) 2, disk.get_entries().size());
+    }
+
     {
         const fs::path queue_dir = dir / "queue-match";
         fs::create_directories(queue_dir);
