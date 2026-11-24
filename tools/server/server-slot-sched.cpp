@@ -487,6 +487,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     });
 
     std::vector<std::string> keep;
+    std::vector<std::string> names;
     std::vector<const server_prompt_cache_state *> selected;
     size_t size_selected = 0;
     for (const auto * state : candidates) {
@@ -496,6 +497,11 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
         }
 
         const auto name = make_name(compat, tokens.get_hash(tokens.size()));
+        // candidates are newest first, so the first copy has the latest use time
+        if (std::find(names.begin(), names.end(), name) != names.end()) {
+            continue;
+        }
+        names.push_back(name);
         const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
             return cur.name == name;
         });

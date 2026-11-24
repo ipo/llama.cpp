@@ -1009,6 +1009,76 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_equal("queue locked save, queue empty, loads use files", (uint64_t) 2, disk.get_stats().n_loads);
     }
 
+    for (bool background : { false, true }) {
+        for (size_t n_files : { 0, 1, 3 }) {
+            for (int reserve : { 0, 1, 2 }) {
+                for (bool existing : { false, true }) {
+                    for (bool newest_ram : { false, true }) {
+                        const auto case_dir = dir / ("flush-duplicate-" + std::to_string(background) + "-" + std::to_string(n_files) + "-" + std::to_string(reserve) + "-" + std::to_string(existing) + "-" + std::to_string(newest_ram));
+                        fs::create_directories(case_dir);
+                        std::list<server_prompt_cache_state> states;
+                        for (llama_token id : { 2, 3, 4, 5 }) {
+                            auto cur = make_cache_state(2 * n_blk, id < 4 ? id : 4, 1000);
+                            cur.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, id < 4 ? id : 4), false);
+                            cur.t_used = fs::file_time_type{} + std::chrono::seconds(id);
+                            states.push_back(std::move(cur));
+                        }
+                        server_prompt_cache_disk other(case_dir.string(), compat, 0, false);
+                        t.assert_true("flush duplicate, probe", other.save(states.front()));
+                        const size_t size_file = other.size();
+                        fs::remove(case_dir / other.get_entries().front().name);
+                        auto saved = make_cache_state(2 * n_blk, 4, 500);
+                        saved.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, 4), false);
+                        saved.t_used = fs::file_time_type{};
+                        t.assert_true("flush duplicate, smaller file probe", other.save(saved));
+                        const size_t size_existing = other.size();
+                        fs::remove(case_dir / other.get_entries().front().name);
+                        const size_t limit = n_files == 3 && existing ? 2 * size_file + size_existing : n_files * size_file;
+                        server_prompt_cache_disk disk(case_dir.string(), compat, limit, false,
+                                reserve ? 1 : 0, background ? 4096 : 0, false, reserve == 2 ? 0 : 10 * size_file);
+                        if (existing) {
+                            t.assert_true("flush duplicate, shared file", other.save(saved));
+                        }
+                        common_file_lock held((case_dir / ".lock").string());
+                        t.assert_true("flush duplicate, lock", held.acquire());
+                        {
+                            server_prompt_cache_disk::unbounded_queue_guard guard(disk);
+                            auto queued = make_cache_state(2 * n_blk, 4, 1000);
+                            queued.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, 4), false);
+                            queued.t_used = fs::file_time_type{} + std::chrono::seconds(newest_ram ? 1 : 6);
+                            disk.enqueue(std::move(queued));
+                            t.assert_true("flush duplicate, queued before flush", disk.get_stats().pending_bytes > 0);
+                            // The RAM copies also test merging if the writer drains the queue before flush().
+                            held.close();
+                            disk.flush(states);
+                        }
+                        const size_t expected = reserve == 2 ? (existing ? 1 : 0) : (n_files ? n_files : 3);
+                        t.assert_equal("flush duplicate, all unique files fit", expected, disk.get_entries().size());
+                        t.assert_equal("flush duplicate, writes", (uint64_t) (expected - (existing ? 1 : 0)), disk.get_stats().n_saves);
+                        for (const auto & entry : disk.get_entries()) {
+                            const auto id = reserve == 2 ? 4 : 5 - expected;
+                            bool found = false;
+                            for (size_t token = id; token <= 4; ++token) {
+                                const server_tokens tokens(llama_tokens(2 * n_blk, token), false);
+                                found |= entry.hash == tokens.get_hash(2 * n_blk);
+                            }
+                            t.assert_true("flush duplicate, newest unique hashes", found);
+                            t.assert_true("flush duplicate, file exists", fs::exists(case_dir / entry.name));
+                            const server_tokens duplicate(llama_tokens(2 * n_blk, 4), false);
+                            if (entry.hash == duplicate.get_hash(2 * n_blk)) {
+                                const auto time = fs::file_time_type{} + std::chrono::seconds(reserve == 2 ? 0 : newest_ram ? 5 : 6);
+                                t.assert_true("flush duplicate, newest copy time", entry.t_used == time);
+                                t.assert_equal("flush duplicate, existing file size retained", existing ? size_existing : size_file, entry.size);
+                            }
+                        }
+                        t.assert_equal("flush duplicate, queue drained", (uint64_t) 0, disk.get_stats().pending_bytes);
+                        t.assert_equal("flush duplicate, no drops", (uint64_t) 0, disk.get_stats().n_drops);
+                    }
+                }
+            }
+        }
+    }
+
     for (size_t n_files : { 0, 1, 2, 4 }) {
         for (int reserve : { 0, 1, 2 }) {
             for (bool existing : { false, true }) {
