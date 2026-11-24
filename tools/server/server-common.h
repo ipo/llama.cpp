@@ -542,6 +542,7 @@ struct server_prompt_cache_disk_stats {
     // current state of the directory, the files of other models included
     uint64_t n_files = 0;
     uint64_t size    = 0; // in bytes
+    uint64_t pending_bytes = 0; // waiting for or being written to disk
 };
 
 // shared between server_context_impl and server_task_result_*
