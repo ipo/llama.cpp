@@ -72,6 +72,7 @@ struct server_prompt_data {
 struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
+    std::filesystem::file_time_type t_used = std::filesystem::file_time_type::clock::now();
 
     size_t size() const {
         size_t res = data.size();
@@ -121,7 +122,7 @@ struct server_prompt_cache_disk {
     // moves an evicted state to the writer, or saves it synchronously when the queue is disabled
     void enqueue(server_prompt_cache_state && state);
 
-    // writes newest first, then restores the recency order without rewriting data
+    // writes newest first, keeping each state's recency time
     void flush(const std::list<server_prompt_cache_state> & states);
 
     // loads the saved prompt that shares the longest prefix with the tokens
@@ -148,8 +149,8 @@ private:
 
     entry_list::iterator remove(entry_list::iterator it);
 
-    // marks the entry as the most recently used one
-    void touch(entry_list::iterator it);
+    // stamps the file and keeps entries ordered oldest first
+    void touch(entry_list::iterator it, std::filesystem::file_time_type t_used);
 
     void writer_loop();
 
