@@ -278,57 +278,61 @@ static void test_server_prompt_cache_disk(testing & t) {
     const std::string compat   = "0123456789abcdef";
     {
         common_params params;
-        const auto compat_for = [&](int32_t n_ctx_seq, int32_t n_seq_max, int32_t n_ctx_seq_dft, bool has_draft_context) {
-            return server_prompt_cache_disk_compat(params, n_ctx_seq, n_seq_max, n_ctx_seq_dft, has_draft_context);
+        const auto compat_for = [&](int32_t n_ctx_seq, int32_t n_seq_max, int32_t n_ctx_seq_dft, bool swa_full_dft, bool has_draft_context) {
+            return server_prompt_cache_disk_compat(params, n_ctx_seq, n_seq_max, n_ctx_seq_dft, swa_full_dft, has_draft_context);
         };
-        const auto baseline = compat_for(4096, 1, 0, false);
-        t.assert_equal("compat id, same inputs", baseline, compat_for(4096, 1, 0, false));
-        t.assert_true("compat id, context size", baseline != compat_for(2048, 1, 0, false));
-        t.assert_true("compat id, sequence count", baseline != compat_for(4096, 2, 0, false));
+        const auto baseline = compat_for(4096, 1, 0, false, false);
+        t.assert_equal("compat id, same inputs", baseline, compat_for(4096, 1, 0, false, false));
+        t.assert_true("compat id, context size", baseline != compat_for(2048, 1, 0, false, false));
+        t.assert_true("compat id, sequence count", baseline != compat_for(4096, 2, 0, false, false));
 
         params.kv_unified = !params.kv_unified;
-        t.assert_true("compat id, kv unified", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, kv unified", baseline != compat_for(4096, 1, 0, false, false));
         params.kv_unified = !params.kv_unified;
 
         params.flash_attn_type = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED ?
             LLAMA_FLASH_ATTN_TYPE_DISABLED : LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        t.assert_true("compat id, flash attention", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, flash attention", baseline != compat_for(4096, 1, 0, false, false));
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
         params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
-        t.assert_true("compat id, speculative types", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, speculative types", baseline != compat_for(4096, 1, 0, false, false));
         params.speculative.types = { COMMON_SPECULATIVE_TYPE_NONE };
 
-        t.assert_true("compat id, draft context", baseline != compat_for(4096, 1, 0, true));
+        t.assert_true("compat id, draft context", baseline != compat_for(4096, 1, 0, false, true));
 
         llama_model_kv_override override = {};
         override.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
         override.key[0] = 'x';
         override.val_i64 = 1;
         params.kv_overrides = { override };
-        t.assert_true("compat id, kv override added", baseline != compat_for(4096, 1, 0, false));
-        const auto compat_with_override = compat_for(4096, 1, 0, false);
+        t.assert_true("compat id, kv override added", baseline != compat_for(4096, 1, 0, false, false));
+        const auto compat_with_override = compat_for(4096, 1, 0, false, false);
         params.kv_overrides[0].val_i64 = 2;
-        t.assert_true("compat id, kv override value", compat_with_override != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, kv override value", compat_with_override != compat_for(4096, 1, 0, false, false));
+        params.kv_overrides[0].val_i64 = 1;
         params.kv_overrides[0].key[0] = 'y';
-        t.assert_true("compat id, kv override key", compat_with_override != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, kv override key", compat_with_override != compat_for(4096, 1, 0, false, false));
+        params.kv_overrides[0].key[0] = 'x';
         params.kv_overrides[0].tag = LLAMA_KV_OVERRIDE_TYPE_BOOL;
         params.kv_overrides[0].val_bool = true;
-        t.assert_true("compat id, kv override type", compat_with_override != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, kv override type", compat_with_override != compat_for(4096, 1, 0, false, false));
         params.kv_overrides.clear();
 
         params.attention_type = LLAMA_ATTENTION_TYPE_CAUSAL;
-        t.assert_true("compat id, attention type", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, attention type", baseline != compat_for(4096, 1, 0, false, false));
         params.attention_type = LLAMA_ATTENTION_TYPE_UNSPECIFIED;
 
         params.speculative.draft.cache_type_k = GGML_TYPE_Q8_0;
-        t.assert_true("compat id, draft cache type K", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, draft cache type K", baseline != compat_for(4096, 1, 0, false, false));
         params.speculative.draft.cache_type_k = GGML_TYPE_F16;
         params.speculative.draft.cache_type_v = GGML_TYPE_Q8_0;
-        t.assert_true("compat id, draft cache type V", baseline != compat_for(4096, 1, 0, false));
+        t.assert_true("compat id, draft cache type V", baseline != compat_for(4096, 1, 0, false, false));
         params.speculative.draft.cache_type_v = GGML_TYPE_F16;
-        const auto compat_with_draft = compat_for(4096, 1, 1024, true);
-        t.assert_true("compat id, draft context size", compat_with_draft != compat_for(4096, 1, 2048, true));
+        const auto compat_with_draft = compat_for(4096, 1, 1024, false, true);
+        t.assert_true("compat id, draft context size", compat_with_draft != compat_for(4096, 1, 2048, false, true));
+        const auto compat_with_draft_no_swa = compat_for(4096, 1, 0, false, true);
+        t.assert_true("compat id, draft swa full", compat_with_draft_no_swa != compat_for(4096, 1, 0, true, true));
     }
 
     const auto        state    = make_cache_state(n_tok, 1, 1000);
