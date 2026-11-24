@@ -279,6 +279,8 @@ void server_prompt_cache_disk::writer_loop() {
             }
         }
 
+        // TODO: the writer takes the mutex again right after a write, so a waiting flush() or load() gets it only when the queue is empty
+        //       at shutdown the oldest queued states are then written before the flush can write the newest ones
         std::lock_guard<std::mutex> guard_mutex(mutex);
         server_cache_disk_lock guard(lock);
         {
