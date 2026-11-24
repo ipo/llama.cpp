@@ -796,6 +796,8 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
 
                 data.clear();
                 data.shrink_to_fit();
+            } else if (ctx_dft != nullptr) {
+                llama_memory_seq_rm(llama_get_memory(ctx_dft), id_slot, -1, -1);
             }
         }
 
