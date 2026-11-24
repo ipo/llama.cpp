@@ -149,7 +149,7 @@ private:
 };
 
 // id of everything that makes a saved state unusable when it changes
-std::string server_prompt_cache_disk_compat(const common_params & params, int32_t n_ctx_seq, int32_t n_seq_max, bool has_draft_context);
+std::string server_prompt_cache_disk_compat(const common_params & params, int32_t n_ctx_seq, int32_t n_seq_max, int32_t n_ctx_seq_dft, bool swa_full_dft, bool has_draft_context);
 
 struct server_prompt_cache {
     server_prompt_cache(int32_t limit_size_mib, size_t limit_tokens) {
