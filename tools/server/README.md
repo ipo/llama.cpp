@@ -357,7 +357,7 @@ With `--cache-disk PATH`, the prompts that no longer fit in the RAM cache (`--ca
 llama-server -m model.gguf --cache-disk /path/to/cache --cache-disk-max-size 32768
 ```
 
-- **Saving:** a prompt is saved when the RAM cache drops it, and when the server shuts down or goes to sleep (idle slots included). A server that is killed loses the prompts that were only in RAM.
+- **Saving:** a prompt is saved when the RAM cache drops it, and when the server shuts down or goes to sleep (idle slots included, newest prompts first). A server that is killed loses the prompts that were only in RAM.
 - **Loading:** for each request, the saved prompt that shares the longest prefix with it is loaded, if it shares more than the slot and the RAM cache do. It does not need to be a full prefix: the state is cut where the prompts differ. Context checkpoints are saved too.
 - **Size:** a file is about as large as the same prompt in the RAM cache. With `--cache-disk-max-size N`, the least recently used files are removed to stay under `N` MiB. There is no limit by default.
 - **Compatibility:** a file is only used with the same model, mmproj, draft model, LoRA adapters, control vectors, KV cache types, `--swa-full`, RoPE/YaRN options, sequence context size, number of sequences, `--kv-unified`, flash attention setting, speculative decoding types and draft context availability. Other files are ignored, but they count in the size limit.
