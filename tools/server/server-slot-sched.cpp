@@ -231,21 +231,37 @@ server_prompt_cache_disk::unbounded_queue_guard::unbounded_queue_guard(server_pr
 }
 
 server_prompt_cache_disk::unbounded_queue_guard::~unbounded_queue_guard() {
-    std::lock_guard<std::mutex> guard(disk.mutex_queue);
-    disk.queue_unbounded = was_unbounded;
+    std::list<server_prompt_cache_state> pending;
+    {
+        std::lock_guard<std::mutex> guard(disk.mutex_queue);
+        disk.queue_unbounded = was_unbounded;
+        if (disk.queue_limit == 0 && !was_unbounded) {
+            pending.splice(pending.end(), disk.queue);
+            disk.queue_size = 0;
+        }
+    }
+    // No writer can drain these states if an idle slot save throws before flush().
+    for (const auto & state : pending) {
+        try {
+            disk.save(state);
+        } catch (const std::exception & e) {
+            SRV_ERR("disk prompt cache save failed: %s\n", e.what());
+        }
+    }
 }
 
 void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
     if (state.prompt.lora_changed || state.prompt.tokens.size() < server_tokens::hash_block_size || state.data.main.empty()) {
         return;
     }
-    if (queue_limit == 0) {
+    std::unique_lock<std::mutex> guard(mutex_queue);
+    if (queue_limit == 0 && !queue_unbounded) {
+        guard.unlock();
         save(state);
         return;
     }
 
     const size_t size = state.size();
-    std::unique_lock<std::mutex> guard(mutex_queue);
     condition.wait(guard, [&] {
         const auto & tokens = state.prompt.tokens;
         for (auto it = queue.begin(); it != queue.end();) {
@@ -471,6 +487,7 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     });
 
     std::vector<std::string> keep;
+    std::vector<std::string> names;
     std::vector<const server_prompt_cache_state *> selected;
     size_t size_selected = 0;
     for (const auto * state : candidates) {
@@ -480,6 +497,11 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
         }
 
         const auto name = make_name(compat, tokens.get_hash(tokens.size()));
+        // candidates are newest first, so the first copy has the latest use time
+        if (std::find(names.begin(), names.end(), name) != names.end()) {
+            continue;
+        }
+        names.push_back(name);
         const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
             return cur.name == name;
         });

@@ -124,7 +124,7 @@ struct server_prompt_cache_disk {
     // moves an evicted state to the writer, or saves it synchronously when the queue is disabled
     void enqueue(server_prompt_cache_state && state);
 
-    // keeps shutdown and sleep saves from waiting for room or dropping queued states
+    // defers synchronous writes and keeps shutdown and sleep saves from waiting for room or dropping queued states
     struct unbounded_queue_guard {
         explicit unbounded_queue_guard(server_prompt_cache_disk & disk);
         ~unbounded_queue_guard();
