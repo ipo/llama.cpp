@@ -124,6 +124,18 @@ struct server_prompt_cache_disk {
     // moves an evicted state to the writer, or saves it synchronously when the queue is disabled
     void enqueue(server_prompt_cache_state && state);
 
+    // keeps shutdown and sleep saves from waiting for room or dropping queued states
+    struct unbounded_queue_guard {
+        explicit unbounded_queue_guard(server_prompt_cache_disk & disk);
+        ~unbounded_queue_guard();
+        unbounded_queue_guard(const unbounded_queue_guard &) = delete;
+        unbounded_queue_guard & operator=(const unbounded_queue_guard &) = delete;
+
+    private:
+        server_prompt_cache_disk & disk;
+        bool was_unbounded;
+    };
+
     // writes newest first, keeping each state's recency time
     void flush(const std::list<server_prompt_cache_state> & states);
 
@@ -176,6 +188,7 @@ private:
     std::list<server_prompt_cache_state> queue;
     size_t queue_limit;
     bool queue_drop;
+    bool queue_unbounded = false;
     size_t queue_size = 0;
     server_prompt_cache_state * writing = nullptr;
     bool writing_taken = false;

@@ -823,6 +823,58 @@ static void test_server_prompt_cache_disk(testing & t) {
         t.assert_equal("queue locked save, queue empty, loads use files", (uint64_t) 2, disk.get_stats().n_loads);
     }
 
+    for (bool drop : { true, false }) {
+        const fs::path queue_dir = dir / (drop ? "queue-shutdown-drop" : "queue-shutdown-wait");
+        fs::create_directories(queue_dir);
+        server_prompt_cache cache(0, 1);
+        auto a = make_cache_state(2 * n_blk, 1, 1000);
+        a.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, 1), false);
+        const size_t state_size = a.size();
+        cache.disk = std::make_unique<server_prompt_cache_disk>(queue_dir.string(), compat, 0, false, 0, state_size, drop);
+        auto & disk = *cache.disk;
+        common_file_lock held((queue_dir / ".lock").string());
+        t.assert_true("queue shutdown, lock", held.acquire());
+        disk.enqueue(std::move(a));
+        const auto n_drops = disk.get_stats().n_drops;
+        {
+            server_prompt_cache_disk::unbounded_queue_guard guard(disk);
+            for (llama_token last : { 2, 3 }) {
+                auto cur = make_cache_state(2 * n_blk, last, 1000);
+                cur.prompt.tokens = server_tokens(llama_tokens(2 * n_blk, last), false);
+                cache.states.push_back(std::move(cur));
+                cache.update();
+            }
+            t.assert_equal("queue shutdown, RAM evicted", (size_t) 0, cache.size());
+            t.assert_equal("queue shutdown, no writes while locked", (uint64_t) 0, disk.get_stats().n_saves);
+            t.assert_equal("queue shutdown, all handovers returned while locked", (uint64_t) (3 * state_size), disk.get_stats().pending_bytes);
+            t.assert_equal("queue shutdown, no drops", n_drops, disk.get_stats().n_drops);
+            held.close();
+            cache.flush_to_disk();
+            t.assert_equal("queue shutdown, all saved", (uint64_t) 3, disk.get_stats().n_saves);
+            t.assert_equal("queue shutdown, all files", (size_t) 3, disk.get_entries().size());
+            for (llama_token last : { 1, 2, 3 }) {
+                const server_tokens tokens(llama_tokens(2 * n_blk, last), false);
+                bool found = false;
+                for (const auto & entry : disk.get_entries()) {
+                    found |= entry.hash == tokens.get_hash(2 * n_blk) && fs::exists(queue_dir / entry.name);
+                }
+                t.assert_true("queue shutdown, file exists", found);
+            }
+            t.assert_equal("queue shutdown, no drops after flush", n_drops, disk.get_stats().n_drops);
+            t.assert_equal("queue shutdown, queue empty", (uint64_t) 0, disk.get_stats().pending_bytes);
+        }
+        if (drop) {
+            t.assert_true("queue shutdown, lock after save", held.acquire());
+            for (llama_token last : { 4, 5 }) {
+                disk.enqueue(make_cache_state(2 * n_blk, last, 1000));
+            }
+            t.assert_equal("queue shutdown, bound restored", (uint64_t) state_size, disk.get_stats().pending_bytes);
+            t.assert_equal("queue shutdown, drops restored", n_drops + 1, disk.get_stats().n_drops);
+            held.close();
+            disk.flush({});
+        }
+    }
+
     for (const std::string kind : { "one", "oldest", "multiple", "oversized" }) {
         const fs::path queue_dir = dir / ("queue-drop-" + kind);
         fs::create_directories(queue_dir);

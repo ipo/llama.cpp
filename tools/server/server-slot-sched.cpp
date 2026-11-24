@@ -223,6 +223,18 @@ server_prompt_cache_disk::~server_prompt_cache_disk() {
     }
 }
 
+server_prompt_cache_disk::unbounded_queue_guard::unbounded_queue_guard(server_prompt_cache_disk & disk) : disk(disk) {
+    std::lock_guard<std::mutex> guard(disk.mutex_queue);
+    was_unbounded = disk.queue_unbounded;
+    disk.queue_unbounded = true;
+    disk.condition.notify_all();
+}
+
+server_prompt_cache_disk::unbounded_queue_guard::~unbounded_queue_guard() {
+    std::lock_guard<std::mutex> guard(disk.mutex_queue);
+    disk.queue_unbounded = was_unbounded;
+}
+
 void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
     if (state.prompt.lora_changed || state.prompt.tokens.size() < server_tokens::hash_block_size || state.data.main.empty()) {
         return;
@@ -246,6 +258,9 @@ void server_prompt_cache_disk::enqueue(server_prompt_cache_state && state) {
             } else {
                 ++it;
             }
+        }
+        if (queue_unbounded) {
+            return true;
         }
         const auto fits = [&] {
             return queue_size == 0 || (size <= queue_limit && queue_size <= queue_limit - size);
