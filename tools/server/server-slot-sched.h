@@ -6,10 +6,12 @@
 #include "file-lock.h"
 
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -105,7 +107,7 @@ struct server_prompt_cache_disk {
     // compat: 16 hex chars, changes when the saved states can no longer be used (other model, mmproj, etc.)
     // limit_size: in bytes, 0 = no limit
     // queue_limit: in bytes, 0 = synchronous writes
-    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, bool queue_drop = false);
+    server_prompt_cache_disk(const std::string & dir, const std::string & compat, size_t limit_size, bool has_mtmd, size_t min_free_size = 0, size_t queue_limit = 0, bool queue_drop = false, std::optional<std::uintmax_t> space_available_override = std::nullopt);
     ~server_prompt_cache_disk();
 
     // the files as of the last operation, another server can change them at any time
@@ -157,6 +159,7 @@ private:
     std::string compat;
     size_t limit_size;
     size_t min_free_size;
+    std::optional<std::uintmax_t> space_available_override;
     bool has_mtmd;
 
     // oldest first
