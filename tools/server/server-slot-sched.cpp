@@ -380,6 +380,7 @@ server_prompt_cache_disk_stats server_prompt_cache_disk::get_stats() const {
     server_prompt_cache_disk_stats res = stats;
     res.n_files = entries.size();
     res.size    = size_impl();
+    res.pending_bytes = queue_size;
     return res;
 }
 

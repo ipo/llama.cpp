@@ -1679,6 +1679,10 @@ std::string server_task_result_metrics::to_metrics() {
             "prompt_cache_disk_bytes",
             "Disk prompt cache: Size of the directory in bytes",
             (double) cache_disk.size
+        }, {
+            "prompt_cache_disk_pending_bytes",
+            "Disk prompt cache: Size of states waiting for or being written to disk",
+            (double) cache_disk.pending_bytes
         },
     };
 
