@@ -489,6 +489,39 @@ static void test_server_prompt_cache_disk(testing & t) {
         }
     }
 
+    for (size_t n_files = 1; n_files <= 4; ++n_files) {
+        const auto order_dir = dir / ("time-order-" + std::to_string(n_files));
+        fs::create_directories(order_dir);
+        size_t size_file;
+        {
+            server_prompt_cache_disk probe(order_dir.string(), compat, 0, false);
+            t.assert_true("time order, probe save", probe.save(state));
+            size_file = probe.size();
+        }
+        fs::remove_all(order_dir);
+        fs::create_directories(order_dir);
+        server_prompt_cache cache(0, 0);
+        cache.disk = std::make_unique<server_prompt_cache_disk>(order_dir.string(), compat, n_files == 4 ? 0 : n_files * size_file, false);
+        for (llama_token last : { 3, 1, 4, 2 }) {
+            auto cur = make_cache_state(n_tok, last, 1000);
+            cur.t_used = fs::file_time_type{} + std::chrono::seconds(last);
+            cache.states.push_back(std::move(cur));
+        }
+        cache.flush_to_disk();
+        server_prompt_cache_disk scanned(order_dir.string(), compat, 0, false);
+        t.assert_equal("time order, file count", n_files, scanned.get_entries().size());
+        llama_token last = 5 - n_files;
+        for (const auto & entry : scanned.get_entries()) {
+            const auto expected = make_cache_state(n_tok, last, 1000);
+            t.assert_true("time order, newest retained", entry.hash == expected.prompt.tokens.get_hash(n_tok));
+            t.assert_true("time order, final time", entry.t_used == fs::file_time_type{} + std::chrono::seconds(last));
+            ++last;
+        }
+        const auto n_saves = cache.disk->get_stats().n_saves;
+        cache.flush_to_disk();
+        t.assert_equal("time order, no rewrite", n_saves, cache.disk->get_stats().n_saves);
+    }
+
     {
         const auto stamp_dir = dir / "stamp-save";
         fs::create_directories(stamp_dir);

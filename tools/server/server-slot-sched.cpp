@@ -443,6 +443,9 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     for (auto it = queued.rbegin(); it != queued.rend(); ++it) {
         candidates.push_back(&*it);
     }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto * a, const auto * b) {
+        return a->t_used > b->t_used;
+    });
 
     std::vector<std::string> keep;
     std::vector<const server_prompt_cache_state *> selected;
