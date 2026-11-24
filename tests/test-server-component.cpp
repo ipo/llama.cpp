@@ -274,6 +274,32 @@ static void test_server_prompt_cache_disk(testing & t) {
     fs::create_directories(dir);
 
     const std::string compat   = "0123456789abcdef";
+    {
+        common_params params;
+        const auto compat_for = [&](int32_t n_ctx_seq, int32_t n_seq_max, bool has_draft_context) {
+            return server_prompt_cache_disk_compat(params, n_ctx_seq, n_seq_max, has_draft_context);
+        };
+        const auto baseline = compat_for(4096, 1, false);
+        t.assert_equal("compat id, same inputs", baseline, compat_for(4096, 1, false));
+        t.assert_true("compat id, context size", baseline != compat_for(2048, 1, false));
+        t.assert_true("compat id, sequence count", baseline != compat_for(4096, 2, false));
+
+        params.kv_unified = !params.kv_unified;
+        t.assert_true("compat id, kv unified", baseline != compat_for(4096, 1, false));
+        params.kv_unified = !params.kv_unified;
+
+        params.flash_attn_type = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED ?
+            LLAMA_FLASH_ATTN_TYPE_DISABLED : LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        t.assert_true("compat id, flash attention", baseline != compat_for(4096, 1, false));
+        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+
+        params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+        t.assert_true("compat id, speculative types", baseline != compat_for(4096, 1, false));
+        params.speculative.types = { COMMON_SPECULATIVE_TYPE_NONE };
+
+        t.assert_true("compat id, draft context", baseline != compat_for(4096, 1, true));
+    }
+
     const auto        state    = make_cache_state(n_tok, 1, 1000);
     const auto &      tokens   = state.prompt.tokens;
 
