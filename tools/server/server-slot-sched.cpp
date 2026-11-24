@@ -106,6 +106,10 @@ struct server_cache_disk_header {
     uint64_t size_checkpoints = 0; // headers included
 
     server_tokens::prefix_hash hash = {};
+
+    size_t size() const {
+        return sizeof(*this) + n_hashes * sizeof(server_tokens::prefix_hash) + size_tokens + size_main + size_drft + size_checkpoints;
+    }
 };
 static_assert(sizeof(server_cache_disk_header) == 96, "unexpected header size");
 
@@ -120,6 +124,23 @@ struct server_cache_disk_checkpoint {
     uint64_t size_spec = 0;
 };
 static_assert(sizeof(server_cache_disk_checkpoint) == 40, "unexpected checkpoint header size");
+
+static server_cache_disk_header make_header(const server_prompt_cache_state & state, size_t size_tokens) {
+    const auto & tokens = state.prompt.tokens;
+    server_cache_disk_header header;
+    header.hash          = tokens.get_hash(tokens.size());
+    header.n_tokens      = tokens.size();
+    header.n_hashes      = tokens.get_prefix_hashes().size();
+    header.n_checkpoints = state.prompt.checkpoints.size();
+    header.size_tokens   = size_tokens;
+    header.size_main     = state.data.main.size();
+    header.size_drft     = state.data.drft.size();
+
+    for (const auto & ckpt : state.prompt.checkpoints) {
+        header.size_checkpoints += sizeof(server_cache_disk_checkpoint) + ckpt->data_tgt.size() + ckpt->data_dft.size() + ckpt->data_spec.size();
+    }
+    return header;
+}
 
 static std::string make_name(const std::string & compat, const server_tokens::prefix_hash & hash) {
     static const char hex[] = "0123456789abcdef";
@@ -287,17 +308,53 @@ void server_prompt_cache_disk::flush(const std::list<server_prompt_cache_state> 
     refresh();
 
     std::vector<std::string> keep;
+    std::vector<const server_prompt_cache_state *> selected;
+    size_t size_selected = 0;
     for (auto it = states.rbegin(); it != states.rend(); ++it) {
-        if (!it->prompt.lora_changed && save_impl(*it, keep)) {
+        const auto & tokens = it->prompt.tokens;
+        if (it->prompt.lora_changed || tokens.size() < server_tokens::hash_block_size || it->data.main.empty()) {
+            continue;
+        }
+
+        const auto name = make_name(compat, tokens.get_hash(tokens.size()));
+        const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
+            return cur.name == name;
+        });
+        if (limit_size > 0) {
+            size_t size_file;
+            try {
+                size_file = entry != entries.end() ? entry->size : make_header(*it, tokens.serialize().size()).size();
+            } catch (const std::exception & e) {
+                SRV_WRN("failed to serialize the prompt: %s\n", e.what());
+                continue;
+            }
+            if (size_file > limit_size - size_selected) {
+                continue;
+            }
+            size_selected += size_file;
+        }
+        selected.push_back(&*it);
+        if (entry != entries.end()) {
+            keep.push_back(name);
+        }
+    }
+
+    // protect selected files before a newer state can evict them
+    std::vector<std::string> saved;
+    for (const auto * state : selected) {
+        if (save_impl(*state, keep)) {
             const auto & name = entries.back().name;
             if (std::find(keep.begin(), keep.end(), name) == keep.end()) {
                 keep.push_back(name);
+            }
+            if (std::find(saved.begin(), saved.end(), name) == saved.end()) {
+                saved.push_back(name);
             }
         }
     }
 
     // restore oldest first with metadata updates only
-    for (auto it = keep.rbegin(); it != keep.rend(); ++it) {
+    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
         auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto & cur) {
             return cur.name == *it;
         });
@@ -313,11 +370,6 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
         return false;
     }
 
-    server_cache_disk_header header;
-    header.hash = tokens.get_hash(tokens.size());
-
-    const std::string name = make_name(compat, header.hash);
-
     std::vector<char> tokens_data;
     try {
         tokens_data = tokens.serialize();
@@ -327,20 +379,11 @@ bool server_prompt_cache_disk::save_impl(const server_prompt_cache_state & state
     }
 
     const auto & hashes = tokens.get_prefix_hashes();
-
-    header.n_tokens      = tokens.size();
-    header.n_hashes      = hashes.size();
-    header.n_checkpoints = state.prompt.checkpoints.size();
-    header.size_tokens   = tokens_data.size();
-    header.size_main     = state.data.main.size();
-    header.size_drft     = state.data.drft.size();
-
-    for (const auto & ckpt : state.prompt.checkpoints) {
-        header.size_checkpoints += sizeof(server_cache_disk_checkpoint) + ckpt->data_tgt.size() + ckpt->data_dft.size() + ckpt->data_spec.size();
-    }
+    const auto header = make_header(state, tokens_data.size());
+    const std::string name = make_name(compat, header.hash);
 
     const size_t size_hashes = hashes.size() * sizeof(server_tokens::prefix_hash);
-    const size_t size_file   = sizeof(header) + size_hashes + header.size_tokens + header.size_main + header.size_drft + header.size_checkpoints;
+    const size_t size_file   = header.size();
 
     if (limit_size > 0 && size_file > limit_size) {
         SRV_WRN(" - prompt size %.3f MiB exceeds disk cache size limit %.3f MiB, skipping\n",

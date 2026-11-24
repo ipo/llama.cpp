@@ -124,7 +124,7 @@ struct server_prompt_cache_disk {
 private:
     using entry_list = std::list<server_prompt_cache_disk_entry>;
 
-    // the lock must be held; keep lists files saved or touched by this flush
+    // the lock must be held; keep lists files reserved for this flush
     bool save_impl(const server_prompt_cache_state & state, const std::vector<std::string> & keep);
 
     // reads the directory again, the lock must be held
