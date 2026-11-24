@@ -1,4 +1,5 @@
 import pytest
+import signal
 import time
 from utils import *
 
@@ -69,6 +70,51 @@ def test_server_sleep():
     res = server.make_request("GET", "/props")
     assert res.status_code == 200
     assert res.body["is_sleeping"] == False
+
+
+def test_server_signal_during_sleep_save(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    log_path = tmp_path / "server.log"
+    server.cache_disk = str(cache_dir)
+    server.log_path = str(log_path)
+    server.sleep_idle_seconds = 1
+    server.n_slots = 1
+    server.start()
+
+    res = server.make_request("POST", "/completion", data={
+        "prompt": [10 + i for i in range(200)],
+        "n_predict": 0,
+        "cache_prompt": True,
+    })
+    assert res.status_code == 200
+    assert server.process is not None
+
+    def wait_for_log(message):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if message in log_path.read_text():
+                return
+            assert server.process.poll() is None
+            time.sleep(0.01)
+        raise TimeoutError(f"server did not log: {message}")
+
+    with (cache_dir / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            wait_for_log("server is entering sleeping state")
+            assert not list(cache_dir.glob("*.cache"))
+            server.process.send_signal(signal.SIGTERM)
+            wait_for_log(f"received signal {signal.SIGTERM}, shutting down")
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+    assert server.process.wait(timeout=10) == 0
+    assert "cleaning up before exit" in log_path.read_text()
+    files = list(cache_dir.glob("*.cache"))
+    assert len(files) == 1
+    assert files[0].stat().st_size > 0
 
 
 def test_server_sleep_read_only_endpoints():
